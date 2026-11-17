@@ -1,0 +1,4 @@
+# Claves privadas, código de emparejamiento y contraseña del hotspot
+certs/
+__pycache__/
+host-rs/target/

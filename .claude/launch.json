@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "pantalla-host",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-u", "host/main.py"],
+      "port": 8080
+    },
+    {
+      "name": "pantalla-host-rs",
+      "runtimeExecutable": "host-rs/target/release/pantalla-host.exe",
+      "runtimeArgs": [],
+      "port": 8080
+    }
+  ]
+}

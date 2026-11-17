@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Configurar dispositivo</title>
+  <link rel="stylesheet" href="/style.css">
+  <style>
+    html, body { overflow: auto; -webkit-user-select: text; user-select: text; }
+    main { max-width: 640px; margin: 0 auto; padding: 20px 16px 40px; }
+    h2 { margin: 28px 0 8px; font-size: 17px; }
+    ol { padding-left: 20px; }
+    li { margin-bottom: 6px; }
+    a { color: var(--accent); }
+    .box { padding: 14px 16px; border-radius: 12px; background: var(--panel); border: 1px solid var(--border); }
+    .fp { font: 12px/1.5 ui-monospace, Consolas, monospace; word-break: break-all; color: var(--muted); }
+    .big { display: block; margin: 10px 0; padding: 12px; border-radius: 10px; background: var(--accent);
+           color: #fff; text-align: center; font-weight: 600; text-decoration: none; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Configurar este dispositivo</h1>
+  <p class="sub">El visor necesita HTTPS para decodificar vídeo con el navegador. El portátil usa su propio
+    certificado, así que hay que confiar en él una vez por dispositivo.</p>
+
+  <h2>Opción rápida (Chrome en Android, para probar)</h2>
+  <div class="box">
+    <ol>
+      <li>Abre <a id="https-link" href="#">la pantalla por HTTPS</a>.</li>
+      <li>Chrome avisará de que la conexión no es privada: toca <b>Configuración avanzada</b> y después
+        <b>Acceder a … (sitio no seguro)</b>.</li>
+      <li>Introduce el código que aparece en la consola del portátil y pulsa <b>Conectar</b>.</li>
+    </ol>
+    <p class="sub">Tendrás que aceptar el aviso de nuevo de vez en cuando. Para dejarlo resuelto, instala el certificado.</p>
+  </div>
+
+  <h2>Instalar el certificado (recomendado, una sola vez)</h2>
+  <div class="box">
+    <a class="big" href="/ca.crt">Descargar certificado</a>
+    <p><b>Android (Samsung Galaxy):</b></p>
+    <ol>
+      <li>Ajustes → <b>Seguridad y privacidad</b> → <b>Más ajustes de seguridad</b> →
+        <b>Instalar desde almacenamiento del dispositivo</b> → <b>Certificado de CA</b>.</li>
+      <li>Acepta el aviso y elige <code>pantalla-poc-ca.crt</code> en Descargas.</li>
+    </ol>
+    <p><b>iPad / iPhone (Safari):</b></p>
+    <ol>
+      <li>Al descargarlo, permite la descarga del perfil.</li>
+      <li>Ajustes → <b>Perfil descargado</b> → <b>Instalar</b>.</li>
+      <li>Ajustes → General → Información → <b>Ajustes de confianza de certificados</b> → actívalo.</li>
+    </ol>
+    <p class="sub">Comprueba que la huella coincide con la que muestra el portátil:</p>
+    <p class="fp" id="fp">…</p>
+  </div>
+
+  <h2>Abrir la pantalla</h2>
+  <div class="box">
+    <a class="big" id="https-link-2" href="#">Abrir la pantalla</a>
+    <p class="sub">Consejo: en el menú del navegador, <b>Añadir a pantalla de inicio</b> la abre a pantalla completa
+      como si fuera una app.</p>
+  </div>
+</main>
+<script type="module">
+  const info = await (await fetch('/info')).json();
+  const url = `https://${location.hostname}:${info.httpsPort}/`;
+  for (const id of ['https-link', 'https-link-2']) document.getElementById(id).href = url;
+  document.getElementById('fp').textContent = `SHA-256 ${info.caFingerprint}`;
+</script>
+</body>
+</html>

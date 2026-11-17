@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sonda de latencia</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #20232a; color: #cfd3dc;
+                 font: 15px/1.4 system-ui, "Segoe UI", sans-serif; }
+    canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+    #info { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); padding: 10px 16px;
+            border-radius: 10px; background: rgba(0, 0, 0, .55); text-align: center; }
+    kbd { padding: 1px 6px; border: 1px solid #666; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <canvas id="probe"></canvas>
+  <div id="info">Conectando…</div>
+  <script type="module" src="/probe.js"></script>
+</body>
+</html>

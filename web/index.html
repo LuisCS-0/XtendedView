@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="theme-color" content="#000000">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <title>Pantalla</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <canvas id="screen"></canvas>
+  <canvas id="cursor" hidden></canvas>
+  <pre id="hud" hidden></pre>
+  <div id="toast" role="status" hidden></div>
+  <button id="menu-btn" class="menu-btn" aria-label="Menú" hidden>⋯</button>
+
+  <section id="panel" class="overlay">
+    <div class="card">
+      <h1>Pantalla secundaria</h1>
+      <p class="sub" id="host"></p>
+      <p id="status" class="status">Preparado.</p>
+      <p id="problem" class="warn" hidden></p>
+
+      <label>Código de emparejamiento
+        <input id="key" autocomplete="off" autocapitalize="characters" spellcheck="false"
+               placeholder="XXXX-XXXX" maxlength="9">
+      </label>
+      <label>Modo
+        <select id="mode">
+          <option value="extend" selected>Extender (pantalla nueva)</option>
+          <option value="mirror">Duplicar (espejo)</option>
+        </select>
+      </label>
+      <div class="row">
+        <label>Fotogramas
+          <select id="fps"><option>30</option><option selected>60</option><option>90</option><option>120</option></select>
+        </label>
+        <label>Calidad
+          <select id="bitrate">
+            <option value="10">10 Mbps</option><option value="20" selected>20 Mbps</option>
+            <option value="35">35 Mbps</option><option value="50">50 Mbps</option>
+          </select>
+        </label>
+        <label>Resolución
+          <select id="scale"><option value="1" selected>100 %</option><option value="0.75">75 %</option><option value="0.5">50 %</option></select>
+        </label>
+      </div>
+      <label class="check"><input type="checkbox" id="showhud" checked> Mostrar estadísticas</label>
+      <label class="check"><input type="checkbox" id="measure"> Medir latencia total
+        <span class="hint">(abre <code>localhost:8080/probe</code> en el portátil y déjala visible)</span></label>
+
+      <button id="start" class="primary">Conectar</button>
+      <button id="fullscreen" class="secondary" hidden>Pantalla completa</button>
+    </div>
+  </section>
+
+  <script type="module" src="/viewer.js"></script>
+</body>
+</html>
