@@ -30,6 +30,10 @@ const m = {
 
 // ------------------------------------------------------------------ ajustes
 
+// Claves de localStorage. "fps2": con la opción Auto nueva, se ignora el valor guardado antes
+// (que solía ser el 60 por defecto).
+const STORE = { mode: 'mode', fps: 'fps2', bitrate: 'bitrate', scale: 'scale' };
+
 const normKey = (s) => s.toUpperCase().replace(/[^A-Z0-9]/g, '');
 const formatKey = (s) => { const k = normKey(s); return k.length > 4 ? `${k.slice(0, 4)}-${k.slice(4, 8)}` : k; };
 
@@ -40,8 +44,8 @@ function loadSettings() {
     history.replaceState(null, '', location.pathname + location.search);
   }
   ui.key.value = formatKey(storage('key') || '');
-  for (const id of ['mode', 'fps', 'bitrate', 'scale']) {
-    const v = storage(id);
+  for (const [id, key] of Object.entries(STORE)) {
+    const v = storage(key);
     if (v && [...ui[id].options].some((o) => (o.value || o.text) === v)) ui[id].value = v;
   }
   ui.measure.checked = storage('measure') === '1';
@@ -50,7 +54,7 @@ function loadSettings() {
 
 function saveSettings() {
   storage('key', normKey(ui.key.value));
-  for (const id of ['mode', 'fps', 'bitrate', 'scale']) storage(id, ui[id].value);
+  for (const [id, key] of Object.entries(STORE)) storage(key, ui[id].value);
   storage('measure', ui.measure.checked ? '1' : '0');
   storage('showhud', ui.showhud.checked ? '1' : '0');
 }
@@ -130,10 +134,55 @@ function targetSize() {
   return { w: Math.round(innerWidth * dpr * s), h: Math.round(innerHeight * dpr * s) };
 }
 
+// ------------------------------------------------------------------ frecuencia de pantalla
+// Con "Auto" se captura a la frecuencia real de la pantalla (120 Hz en el Fold): a más
+// frecuencia, menos espera hasta la siguiente captura y menos retraso al mostrar cada frame.
+
+const RATES = [30, 60, 90, 120]; // lo que admite el host
+let displayHz = 60;
+
+/** Frecuencia de la pantalla en Hz, o null si el navegador no anima (pestaña oculta, etc.). */
+function measureRefresh(frames = 30, timeoutMs = 1500) {
+  return new Promise((resolve) => {
+    const times = [];
+    let done = false;
+    const timer = setTimeout(() => { done = true; resolve(null); }, timeoutMs);
+    const step = (t) => {
+      if (done) return;
+      times.push(t);
+      if (times.length < frames) { requestAnimationFrame(step); return; }
+      done = true;
+      clearTimeout(timer);
+      const gaps = times.slice(1).map((v, i) => v - times[i]).sort((a, b) => a - b);
+      const median = gaps[Math.floor(gaps.length / 2)];
+      resolve(median > 0 ? 1000 / median : null);
+    };
+    requestAnimationFrame(step);
+  });
+}
+
+async function detectRefresh() {
+  if (document.visibilityState !== 'visible') return; // en segundo plano el navegador frena las animaciones
+  const hz = await measureRefresh();
+  if (hz === null) return; // sin medida: se mantiene la última frecuencia conocida
+  // Mínimo 60: el navegador puede frenar las animaciones (ahorro de batería, pestaña tapada)
+  // y medir menos de lo que da la pantalla.
+  const rate = RATES.filter((r) => r >= 60).reduce((a, b) => (Math.abs(b - hz) < Math.abs(a - hz) ? b : a));
+  ui.fps.options[0].textContent = `Auto (${rate})`;
+  if (rate !== displayHz) {
+    displayHz = rate;
+    if (st.connected && ui.fps.value === 'auto') sendHello();
+  }
+}
+
+function targetFps() {
+  return ui.fps.value === 'auto' ? displayHz : Number(ui.fps.value);
+}
+
 function sendHello() {
   const { w, h } = targetSize();
   const hello = { t: 'hello', key: normKey(ui.key.value), mode: ui.mode.value, w, h,
-    fps: Number(ui.fps.value), bitrate: Number(ui.bitrate.value) };
+    fps: targetFps(), bitrate: Number(ui.bitrate.value) };
   const sig = JSON.stringify(hello);
   if (sig === st.lastHello) return;
   st.lastHello = sig;
@@ -458,11 +507,17 @@ let resizeTimer;
 addEventListener('resize', () => {
   layout();
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(() => { if (st.connected) sendHello(); }, 400);
+  // Al plegar o desplegar puede cambiar también la frecuencia de la pantalla.
+  resizeTimer = setTimeout(async () => {
+    await detectRefresh();
+    if (st.connected) sendHello();
+  }, 400);
 });
 
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && st.want) requestWakeLock();
+  if (document.visibilityState !== 'visible') return;
+  if (st.want) requestWakeLock();
+  detectRefresh();
 });
 
 ui.start.addEventListener('click', () => {
@@ -489,6 +544,7 @@ ui.showhud.addEventListener('change', () => { saveSettings(); renderHud(); });
 
 loadSettings();
 layout();
+detectRefresh();
 ui.host.textContent = location.host;
 const problem = supportProblem();
 if (problem) {

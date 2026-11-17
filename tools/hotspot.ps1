@@ -97,7 +97,8 @@ if ($ips) {
     Write-Host '  La IP del portátil en esta red suele ser 192.168.137.1 (aparece al conectar el primer dispositivo).'
 }
 Write-Host ''
-Write-Host '  Si el móvil no carga la página, permite Python en redes públicas en el Firewall de Windows.'
+Write-Host '  Si el móvil no carga la página, permite el host en redes públicas en el Firewall de Windows.'
+Write-Host '  (Con el host en Rust no hace falta este script: usa pantalla-host.exe --hotspot.)'
 Write-Host '  Ctrl+C para cerrar la red.'
 
 try {

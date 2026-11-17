@@ -9,6 +9,7 @@ mod clock;
 mod convert;
 mod display;
 mod h264;
+mod hotspot;
 mod input;
 mod mfenc;
 mod pipeline;
@@ -76,6 +77,9 @@ pub struct Args {
     /// Muestra los monitores que ve DXGI (y su adaptador) y sale.
     #[arg(long)]
     pub list: bool,
+    /// Crea una red Wi-Fi directa desde el portátil (sin router) mientras el host esté abierto.
+    #[arg(long)]
+    pub hotspot: bool,
 }
 
 fn init_logger(verbose: bool) {
@@ -122,7 +126,7 @@ fn pairing_key(dir: &Path) -> Result<String> {
     Ok(key)
 }
 
-fn print_banner(args: &Args, key: &str, monitor: &capture::OutputInfo, vdd: &Result<vdd::Vdd>) {
+fn print_banner(args: &Args, key: &str, monitor: &capture::OutputInfo, vdd: &Result<vdd::Vdd>, net: Option<&hotspot::Hotspot>) {
     let line = "=".repeat(66);
     println!("{line}\n Pantalla secundaria - host en Rust\n{line}");
     println!(" Monitor principal : {} {}x{} ({})", monitor.name, monitor.rect.w, monitor.rect.h, monitor.adapter);
@@ -132,6 +136,14 @@ fn print_banner(args: &Args, key: &str, monitor: &capture::OutputInfo, vdd: &Res
         Err(e) => println!(" Modo extender     : no disponible ({e:#}); se usará el modo espejo"),
     }
     println!(" Código            : {}-{}", &key[..4], &key[4..]);
+    if let Some(h) = net {
+        println!();
+        println!(" Red Wi-Fi directa (sin router): conecta el móvil o la tablet a esta red");
+        println!("   Nombre     : {}", h.ssid);
+        println!("   Contraseña : {}", h.password);
+        println!("   QR (texto) : {}", h.wifi_qr_text());
+        println!("   Después    : https://192.168.137.1:{}/#k={key}  (la dirección exacta sale al conectar)", args.port);
+    }
     println!();
     println!(" En el móvil o la tablet (misma Wi-Fi o hotspot del portátil):");
     for ip in certs::usable_ips() {
@@ -143,6 +155,20 @@ fn print_banner(args: &Args, key: &str, monitor: &capture::OutputInfo, vdd: &Res
     println!(" Medir latencia: abre esto en el portátil y déjalo visible:");
     println!("   http://localhost:{}/probe", args.http_port);
     println!("{line}");
+}
+
+/// Avisa cuando aparece una dirección nueva (p. ej. la de la red directa, que aparece al
+/// conectarse el primer dispositivo), con la URL lista para abrir.
+async fn announce_new_addresses(port: u16, key: String) {
+    let mut known: std::collections::HashSet<_> = certs::usable_ips().into_iter().collect();
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        for ip in certs::usable_ips() {
+            if known.insert(ip) {
+                log::info!("Nueva dirección: https://{ip}:{port}/#k={key}");
+            }
+        }
+    }
 }
 
 #[tokio::main]
@@ -176,11 +202,45 @@ async fn main() -> Result<()> {
     let https = tokio::net::TcpListener::bind((args.bind.as_str(), args.port)).await?;
     let http = tokio::net::TcpListener::bind((args.bind.as_str(), args.http_port)).await?;
     let vdd = vdd::Vdd::open();
-    print_banner(&args, &key, &monitor, &vdd);
+    let net = if args.hotspot {
+        match hotspot::Hotspot::start(&data.join("hotspot.txt")) {
+            Ok(h) => Some(std::sync::Arc::new(h)),
+            Err(e) => {
+                log::error!("Red Wi-Fi directa: {e:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    print_banner(&args, &key, &monitor, &vdd, net.as_deref());
     let app = server::App::new(args.clone(), key.clone(), root.join("web"), certs, vdd.ok())?;
 
     tokio::spawn(app.clone().watch_ips());
     tokio::spawn(app.clone().touch_keepalive());
+    tokio::spawn(announce_new_addresses(args.port, key.clone()));
+    if let Some(h) = net.clone() {
+        // Vigilante: si la red deja de funcionar (dos comprobaciones seguidas), se recrea.
+        tokio::spawn(async move {
+            let mut failures = 0;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+                let h2 = h.clone();
+                let healthy = tokio::task::spawn_blocking(move || h2.healthy()).await.unwrap_or(true);
+                failures = if healthy { 0 } else { failures + 1 };
+                if failures >= 2 {
+                    log::warn!("La red Wi-Fi directa ha desaparecido; volviendo a crearla…");
+                    let h2 = h.clone();
+                    match tokio::task::spawn_blocking(move || h2.restart()).await {
+                        Ok(Ok(())) => log::info!("Red Wi-Fi directa activa de nuevo: {}", h.ssid),
+                        Ok(Err(e)) => log::error!("No se pudo recrear la red Wi-Fi directa: {e:#}"),
+                        Err(_) => {}
+                    }
+                    failures = 0;
+                }
+            }
+        });
+    }
     tokio::join!(server::serve(app.clone(), https), server::serve(app, http));
     Ok(())
 }

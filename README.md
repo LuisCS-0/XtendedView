@@ -127,14 +127,23 @@ comprobación independiente.
 
 ## Sin router: red directa del portátil
 
+Con el host en Rust:
+
+```
+host-rs\target\release\pantalla-host.exe --hotspot
+```
+
+Con la versión Python, en una consola aparte:
+
 ```
 powershell -ExecutionPolicy Bypass -File tools\hotspot.ps1
 ```
 
-Crea una red Wi-Fi (WPA2) desde el portátil, sin necesidad de internet, y muestra el nombre y la
-contraseña. Conecta el Fold a esa red y abre `https://192.168.137.1:8443/`. La red existe mientras
-el script esté abierto. La contraseña se guarda en `certs\hotspot.txt` para que el móvil la
-recuerde.
+Las dos formas crean una red Wi-Fi (WPA2) desde el portátil, sin necesidad de internet, y muestran
+el nombre y la contraseña. Conecta el Fold a esa red y abre `https://192.168.137.1:8443/`. La red
+existe mientras el host (o el script) esté abierto. El nombre y la contraseña se guardan en
+`certs\hotspot.txt` para que el móvil la recuerde. El portátil puede seguir conectado a la Wi-Fi
+de casa a la vez. Android avisará de que la red no tiene internet: elige mantener la conexión.
 
 Si el portátil sigue conectado a otra Wi-Fi, la tarjeta tiene que repartirse entre las dos y puede
 haber más variación de latencia. Para medir lo mejor posible, desconéctala.
