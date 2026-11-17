@@ -2,7 +2,10 @@
 //!
 //! - El táctil del cliente se inyecta como táctil real (InjectTouchInput): desplazar con el
 //!   dedo, pellizcar, etc. funcionan como en una pantalla táctil.
-//! - El ratón y el lápiz se inyectan como ratón (SendInput). La presión del lápiz, más adelante.
+//! - El lápiz (S Pen, Apple Pencil) se inyecta como lápiz real con un dispositivo sintético
+//!   (InjectSyntheticPointerInput): presión, inclinación, giro, botón lateral, goma y
+//!   desplazamiento sin tocar. Si Windows no lo permite, se usa el ratón.
+//! - El ratón se inyecta como ratón (SendInput).
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::mem::size_of;
@@ -14,15 +17,35 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
     MOUSEEVENTF_WHEEL, MOUSEINPUT, MOUSE_EVENT_FLAGS,
 };
+use windows::Win32::UI::Controls::{
+    CreateSyntheticPointerDevice, DestroySyntheticPointerDevice, HSYNTHETICPOINTERDEVICE, POINTER_FEEDBACK_DEFAULT,
+    POINTER_TYPE_INFO, POINTER_TYPE_INFO_0,
+};
 use windows::Win32::UI::Input::Pointer::{
-    InitializeTouchInjection, InjectTouchInput, POINTER_FLAGS, POINTER_FLAG_CANCELED,
-    POINTER_FLAG_DOWN, POINTER_FLAG_INCONTACT, POINTER_FLAG_INRANGE, POINTER_FLAG_UP,
-    POINTER_FLAG_UPDATE, POINTER_INFO, POINTER_TOUCH_INFO, TOUCH_FEEDBACK_DEFAULT,
+    InitializeTouchInjection, InjectSyntheticPointerInput, InjectTouchInput, POINTER_FLAGS, POINTER_FLAG_CANCELED, POINTER_FLAG_DOWN, POINTER_FLAG_FIRSTBUTTON,
+    POINTER_FLAG_INCONTACT, POINTER_FLAG_INRANGE, POINTER_FLAG_PRIMARY, POINTER_FLAG_SECONDBUTTON, POINTER_FLAG_UP,
+    POINTER_FLAG_UPDATE, POINTER_INFO, POINTER_PEN_INFO, POINTER_TOUCH_INFO, TOUCH_FEEDBACK_DEFAULT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, PT_TOUCH, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    GetSystemMetrics, PT_PEN, PT_TOUCH, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
     SM_YVIRTUALSCREEN,
 };
+
+// Valores de winuser.h para el lápiz.
+const PEN_FLAG_BARREL: u32 = 0x1;
+const PEN_FLAG_INVERTED: u32 = 0x2;
+const PEN_FLAG_ERASER: u32 = 0x4;
+const PEN_MASK_ALL: u32 = 0x1 | 0x2 | 0x4 | 0x8; // presión, giro, inclinación X e Y
+
+/// Dispositivo de lápiz sintético (el identificador se puede usar desde cualquier hilo).
+struct PenDevice(HSYNTHETICPOINTERDEVICE);
+unsafe impl Send for PenDevice {}
+
+impl Drop for PenDevice {
+    fn drop(&mut self) {
+        unsafe { DestroySyntheticPointerDevice(self.0) };
+    }
+}
 
 const MAX_CONTACTS: u32 = 10;
 const TOUCH_MASK_ALL: u32 = 0x1 | 0x2 | 0x4; // área de contacto, orientación, presión
@@ -49,6 +72,20 @@ pub struct PointerEvent {
     pub y: f64,
     #[serde(default)]
     pub b: i32,
+    /// Presión (0..1).
+    #[serde(default)]
+    pub p: f64,
+    /// Inclinación del lápiz en grados (-90..90).
+    #[serde(default)]
+    pub tx: f64,
+    #[serde(default)]
+    pub ty: f64,
+    /// Giro del lápiz sobre su eje (0..359).
+    #[serde(default)]
+    pub tw: f64,
+    /// Botones pulsados (2 = lateral, 32 = goma).
+    #[serde(default)]
+    pub bt: u32,
 }
 
 pub struct Injector {
@@ -58,6 +95,10 @@ pub struct Injector {
     slots: HashMap<String, u32>,
     last_touch: Instant,
     mouse_buttons: Vec<i32>,
+    pen: Option<PenDevice>,
+    pen_unavailable: bool,
+    pen_contact: bool,
+    pen_at: (i32, i32),
 }
 
 impl Injector {
@@ -70,7 +111,82 @@ impl Injector {
             slots: HashMap::new(),
             last_touch: Instant::now(),
             mouse_buttons: Vec::new(),
+            pen: None,
+            pen_unavailable: false,
+            pen_contact: false,
+            pen_at: (0, 0),
         }
+    }
+
+    /// El lápiz sintético se crea la primera vez que se usa.
+    fn pen_device(&mut self) -> Option<HSYNTHETICPOINTERDEVICE> {
+        if self.pen.is_none() && !self.pen_unavailable {
+            match unsafe { CreateSyntheticPointerDevice(PT_PEN, 1, POINTER_FEEDBACK_DEFAULT) } {
+                Ok(dev) => self.pen = Some(PenDevice(dev)),
+                Err(e) => {
+                    log::warn!("Windows no permite el lápiz sintético ({e}); el lápiz funcionará como ratón");
+                    self.pen_unavailable = true;
+                }
+            }
+        }
+        self.pen.as_ref().map(|d| d.0)
+    }
+
+    fn pen(&mut self, ev: &PointerEvent, x: i32, y: i32) -> bool {
+        let Some(dev) = self.pen_device() else { return false };
+        let barrel = ev.bt & 2 != 0;
+        // En contacto: "primer botón" con la punta sola; "segundo botón" con el lateral pulsado.
+        let contact_button = if barrel { POINTER_FLAG_SECONDBUTTON } else { POINTER_FLAG_FIRSTBUTTON };
+        let flags = match ev.e.as_str() {
+            "down" => {
+                self.pen_contact = true;
+                POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_DOWN | contact_button
+            }
+            "move" if self.pen_contact => POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_UPDATE | contact_button,
+            "move" => POINTER_FLAG_INRANGE | POINTER_FLAG_UPDATE, // flotando, sin tocar
+            "up" => {
+                self.pen_contact = false;
+                POINTER_FLAG_INRANGE | POINTER_FLAG_UP
+            }
+            "cancel" => {
+                self.pen_contact = false;
+                POINTER_FLAG_UP | POINTER_FLAG_CANCELED
+            }
+            "leave" if !self.pen_contact => POINTER_FLAG_UPDATE, // fuera de alcance
+            _ => return true,
+        };
+        let mut pen_flags = 0;
+        if barrel {
+            pen_flags |= PEN_FLAG_BARREL;
+        }
+        if ev.bt & 32 != 0 {
+            pen_flags |= PEN_FLAG_ERASER | PEN_FLAG_INVERTED;
+        }
+        let pressure = if self.pen_contact { (ev.p.clamp(0.0, 1.0) * 1024.0).round().max(1.0) as u32 } else { 0 };
+        self.pen_at = (x, y);
+        let info = POINTER_TYPE_INFO {
+            r#type: PT_PEN,
+            Anonymous: POINTER_TYPE_INFO_0 {
+                penInfo: POINTER_PEN_INFO {
+                    pointerInfo: POINTER_INFO {
+                        pointerType: PT_PEN,
+                        pointerFlags: flags | POINTER_FLAG_PRIMARY,
+                        ptPixelLocation: POINT { x, y },
+                        ..Default::default()
+                    },
+                    penFlags: pen_flags,
+                    penMask: PEN_MASK_ALL,
+                    pressure,
+                    rotation: (ev.tw.rem_euclid(360.0)) as u32,
+                    tiltX: ev.tx.clamp(-90.0, 90.0) as i32,
+                    tiltY: ev.ty.clamp(-90.0, 90.0) as i32,
+                },
+            },
+        };
+        if let Err(e) = unsafe { InjectSyntheticPointerInput(dev, &[info]) } {
+            log::debug!("Inyección de lápiz rechazada ({}): {e}", ev.e);
+        }
+        true
     }
 
     fn to_screen(&self, nx: f64, ny: f64) -> Option<(i32, i32)> {
@@ -87,7 +203,9 @@ impl Injector {
         let Some((x, y)) = self.to_screen(ev.x, ev.y) else { return };
         if ev.kind == "touch" && self.touch_ok {
             self.touch(&ev.id.to_string(), &ev.e, x, y);
-        } else {
+        } else if ev.kind == "pen" && self.pen(ev, x, y) {
+            // inyectado como lápiz
+        } else if ev.e != "leave" {
             self.mouse(&ev.e, x, y, ev.b);
         }
     }
@@ -180,6 +298,24 @@ impl Injector {
         }
         for b in std::mem::take(&mut self.mouse_buttons) {
             send_mouse(0, 0, button_flags(b).1, 0);
+        }
+        if self.pen_contact {
+            // Levantar el lápiz si el visor se desconecta a mitad de un trazo.
+            let lift = PointerEvent {
+                e: "cancel".into(),
+                id: serde_json::Value::Null,
+                kind: "pen".into(),
+                x: 0.0,
+                y: 0.0,
+                b: 0,
+                p: 0.0,
+                tx: 0.0,
+                ty: 0.0,
+                tw: 0.0,
+                bt: 0,
+            };
+            let (x, y) = self.pen_at;
+            self.pen(&lift, x, y);
         }
     }
 

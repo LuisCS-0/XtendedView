@@ -405,20 +405,41 @@ function placeCursor() {
 
 // ------------------------------------------------------------------ entrada
 
-const KIND = { pointerdown: 'down', pointermove: 'move', pointerup: 'up', pointercancel: 'cancel' };
+const KIND = {
+  pointerdown: 'down', pointermove: 'move', pointerup: 'up', pointercancel: 'cancel',
+  pointerleave: 'leave', // el lápiz se aleja de la pantalla (deja de flotar)
+};
 
-function onPointer(e) {
-  if (!st.connected || !st.stream) return;
-  e.preventDefault();
-  if (e.type === 'pointerdown') canvas.setPointerCapture?.(e.pointerId);
+function pointerMessage(e, kind) {
   const dpr = window.devicePixelRatio || 1;
   const r = st.rect;
-  send({
-    t: 'pointer', e: KIND[e.type], id: e.pointerId, type: e.pointerType, b: e.button,
+  const msg = {
+    t: 'pointer', e: kind, id: e.pointerId, type: e.pointerType, b: e.button,
     x: +((e.clientX * dpr - r.x) / r.w).toFixed(5),
     y: +((e.clientY * dpr - r.y) / r.h).toFixed(5),
     p: +e.pressure.toFixed(3),
-  });
+  };
+  if (e.pointerType === 'pen') {
+    // Inclinación (-90..90 grados), giro sobre su eje (0..359) y botones: 2 = botón
+    // lateral, 32 = goma de borrar.
+    msg.tx = Math.round(e.tiltX || 0);
+    msg.ty = Math.round(e.tiltY || 0);
+    msg.tw = Math.round(e.twist || 0);
+    msg.bt = e.buttons;
+  }
+  return msg;
+}
+
+function onPointer(e) {
+  if (!st.connected || !st.stream) return;
+  const kind = KIND[e.type];
+  if (kind === 'leave' && e.pointerType !== 'pen') return;
+  e.preventDefault();
+  if (kind === 'down') canvas.setPointerCapture?.(e.pointerId);
+  // El lápiz da muchas más muestras por segundo que fotogramas: se envían todas para que los
+  // trazos salgan suaves y no a tramos rectos.
+  const samples = e.pointerType === 'pen' && kind === 'move' && e.getCoalescedEvents ? e.getCoalescedEvents() : [];
+  for (const s of samples.length ? samples : [e]) send(pointerMessage(s, kind));
 }
 
 for (const type of Object.keys(KIND)) canvas.addEventListener(type, onPointer, { passive: false });

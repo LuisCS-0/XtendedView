@@ -70,6 +70,19 @@ virtual en orientación vertical, como un monitor girado. La imagen se endereza 
 convertirla, sin coste extra. Al girar o plegar el dispositivo, el monitor se adapta solo. Para
 una resolución vertical exacta se registra con el lado largo primero (el aviso ya lo indica así).
 
+### Lápiz (S Pen, Apple Pencil)
+
+Con el host en Rust, el lápiz llega a Windows como un lápiz de verdad, no como un ratón:
+
+- **Presión** (1024 niveles), **inclinación** y **giro**: los programas de dibujo y de notas
+  varían el grosor del trazo igual que con un lápiz conectado al portátil.
+- **Botón lateral** y **goma** (si el lápiz la tiene): Windows los trata como en un lápiz físico.
+- **Lápiz flotando** sin tocar la pantalla: mueve el cursor, como el S Pen sobre el móvil.
+- Se envían todas las muestras del lápiz, no solo una por fotograma, para que los trazos salgan
+  suaves.
+
+Si Windows no permite el lápiz sintético, el lápiz funciona como ratón.
+
 Una lección importante: el codificador QuickSync de Intel espera internamente con el temporizador
 de Windows, que por defecto avanza cada 15,6 ms. Por eso el host en Rust pide 1 ms
 (`timeBeginPeriod`), desactiva el ahorro de energía del proceso y da prioridad MMCSS al hilo de
@@ -180,7 +193,7 @@ GPU. Una versión de FFmpeg con oneVPL, o una captura nativa, permitiría hacerl
 ## Limitaciones actuales
 
 - Modo extender: solo con el host en Rust y el driver Parsec VDD instalado.
-- El lápiz (S Pen / Apple Pencil) funciona como ratón, sin presión.
+- Con el host en Python, el lápiz funciona como ratón, sin presión.
 - Sin audio.
 - iPad: el mismo visor debería funcionar en Safari con iPadOS 16.4 o posterior. Ahí es mejor
   **instalar el certificado** desde `/setup` que aceptar el aviso.
