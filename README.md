@@ -9,10 +9,47 @@ captura (Desktop Duplication) → H.264 (QuickSync) → WebSocket sobre HTTPS �
                        ratón / táctil inyectados en Windows  ←──────────  táctil, ratón y lápiz
 ```
 
+## Instalar (Windows)
+
+`tools\instalador.ps1` genera `dist\XtendedView-<versión>-instalador.exe` (hace falta Rust e
+[Inno Setup 6](https://jrsoftware.org/isdl.php)):
+
+```bash
+powershell -ExecutionPolicy Bypass -File tools\instalador.ps1
+```
+
+El instalador (pide permiso de administrador):
+
+- Instala en `Archivos de programa\XtendedView`, con acceso en el menú Inicio y, si se marca, en el
+  escritorio y al iniciar sesión (entonces arranca junto al reloj, sin abrir el panel).
+- Permite las conexiones entrantes de XtendedView en el cortafuegos, en todos los perfiles: la red
+  propia aparece en Windows como red pública. El programa, igualmente, solo acepta dispositivos
+  encendido, por las conexiones activas, con el código y aceptándolos en el panel.
+- Al desinstalar, pregunta si borrar también los ajustes y certificados.
+
+El mismo guion genera también la **versión portátil**, `dist\XtendedView-<versión>-portable.zip`: se
+descomprime donde se quiera (también en un USB) y se abre `xtendedview.exe`, sin instalar nada. El
+archivo `portable.txt` hace que guarde sus datos en `datos\`, a su lado. La primera vez, Windows
+pregunta si permite que use la red (hay que aceptar, también en redes públicas para la red propia).
+
+La versión instalada (y la portátil) no tiene ventana de consola: vive en el **área de notificación**
+(junto al reloj). Un clic abre el panel; con el botón derecho, **Abrir panel** o **Salir de XtendedView**
+(apaga antes la pantalla, quita los monitores virtuales y cierra la red propia). Si se abre otra vez,
+solo muestra el panel. Con **Cerrar del todo al cerrar el panel** (Ajustes, activado de serie), al
+cerrar la ventana del panel se apaga igual que con el botón Apagar y el programa termina; desactivado,
+sigue junto al reloj. Si un dispositivo pide conectarse con el panel cerrado, sale una
+**notificación de Windows**; al pulsarla se abre el panel. Sus datos (certificados, código, ajustes y
+el registro `xtendedview.log`) van a `%LOCALAPPDATA%\XtendedView`. Desde el código fuente siguen en
+`certs\` (o donde diga `--data`).
+
+La parte del ordenador solo existe para Windows: captura, codificación y monitores virtuales usan
+piezas exclusivas de Windows. Una versión para Linux exigiría adaptarlas.
+
 ## Uso
 
-1. Arranca `host-rs\target\release\xtendedview.exe` desde la carpeta del proyecto. Se abre el
-   **panel de control** en una ventana (también en `http://localhost:8080/panel`).
+1. Arranca XtendedView desde el menú Inicio (o `host-rs\target\release\xtendedview.exe` desde la
+   carpeta del proyecto, con consola). Se abre el **panel de control** en una ventana (también en
+   `http://localhost:8080/panel`).
 2. Elige cómo conectar: **Red del ordenador**, **Red propia** (el ordenador crea su Wi-Fi, sin
    router) o **Cable USB** (experimental). Al elegir, se enciende. Cada encendido crea un **código de
    emparejamiento nuevo**, así que hay que volver a escanear el QR. Mientras está apagada, ningún
@@ -21,9 +58,11 @@ captura (Desktop Duplication) → H.264 (QuickSync) → WebSocket sobre HTTPS �
 3. En el móvil o la tablet, **escanea con la cámara el código QR** del panel. Con red propia hay
    dos: el primero une el dispositivo a la red y el segundo abre la pantalla.
 4. **Acepta la conexión en el panel.** Cada dispositivo que llega aparece arriba con su nombre, su
-   dirección y por dónde llega, con **Aceptar** y **Rechazar** (la ventana del panel parpadea en la
-   barra de tareas). Si no se acepta en 90 s, se rechaza solo. Un dispositivo ya aceptado no vuelve a
-   preguntar hasta que apagues (al reconectar tras un corte o al recargar la página).
+   dirección y por dónde llega, con **Aceptar**, **Rechazar** y **Bloquear** (la ventana del panel
+   parpadea en la barra de tareas o, si está cerrada, sale una notificación de Windows). Si no se
+   acepta en 90 s, se rechaza solo. Un dispositivo ya aceptado no vuelve a preguntar hasta que apagues
+   (al reconectar tras un corte o al recargar la página). Uno bloqueado ya no puede ni pedir
+   conexión; los bloqueados se ven y se desbloquean en Ajustes.
 
 ### Varios dispositivos a la vez
 
@@ -31,9 +70,18 @@ Hasta 4, cada uno con sus propios ajustes, que se guardan para la próxima vez (
 dispositivo guarda un identificador):
 
 - **Pantalla adicional o espejo**, cada uno por su lado: dos pantallas adicionales, una adicional y
-  otra en espejo, dos en espejo del mismo monitor… Cada pantalla adicional tiene su monitor virtual,
-  en el lado elegido; un dispositivo nuevo va a un lado libre, y dos en el mismo lado se colocan uno
-  tras otro.
+  otra en espejo, dos en espejo del mismo monitor… Cada pantalla adicional tiene su monitor virtual.
+- **Colocación como en Windows:** en la sección «Pantallas» del panel hay un plano con los monitores
+  del ordenador y los de los dispositivos. La pantalla de cada dispositivo se arrastra (o se mueve con
+  las flechas) hasta donde está en la mesa y, al soltarla, se pega al borde más cercano sin solaparse;
+  el ordenador la mueve sin cortar la imagen y la recuerda para la próxima vez. Así se ordenan, por
+  ejemplo, dos dispositivos a la derecha. En la tarjeta del dispositivo, los botones **Arriba,
+  Abajo, Izquierda y Derecha** la colocan centrada en ese lado del ordenador (por fuera de otra que ya
+  esté ahí).
+- **Tamaño de los elementos:** la escala de Windows (125 %, 150 %…) de la pantalla adicional de cada
+  dispositivo, para agrandar iconos, textos y barras sin perder nitidez. Windows no documenta cómo
+  cambiarla por programa; se usa lo mismo que su configuración de pantalla (DisplayConfig, tipos -3 y
+  -4). En espejo no se ofrece: cambiaría la del monitor del ordenador.
 - **Fotogramas, calidad, resolución, pantalla completa y estadísticas** por dispositivo.
 - **Por la conexión que quiera:** en la tarjeta «Conexiones» se activan por separado la red del
   ordenador, la red propia y el cable, y puede haber varias a la vez (por ejemplo, la tablet por la red
@@ -43,11 +91,15 @@ Windows solo deja capturar cada monitor una vez por programa: si dos dispositivo
 comparten la captura y cada uno recibe la imagen a su tamaño, fotogramas y calidad.
 
 El dispositivo solo muestra la pantalla, sin menús. Todo se ajusta desde el panel del ordenador,
-en la tarjeta de cada dispositivo: modo, lado o monitor, fotogramas, calidad, resolución, pantalla
-completa, estadísticas, sus medidas (latencias, fotogramas, velocidad, codificador), registrar la
-resolución exacta y desconectarlo. En la parte general: medir la latencia y cambiar el código.
+que tiene tres secciones: **Pantallas** (el plano de colocación y la tarjeta de cada dispositivo:
+modo, monitor que duplica, fotogramas, calidad, resolución, pantalla completa, estadísticas, sus
+medidas, registrar la resolución exacta y desconectarlo), **Conectar** (las tres formas de conectar
+con sus códigos QR) y **Ajustes** (tema claro, oscuro o como Windows, cerrar del todo al cerrar el
+panel, imagen más suave por Wi-Fi, medir la latencia, cambiar el código, el driver de monitores
+virtuales y los dispositivos bloqueados). El código de emparejamiento está siempre a la vista en la
+barra lateral.
 
-Los ajustes se guardan en `certs\ajustes.json`. Al encender, la consola del host también muestra
+Los ajustes se guardan en `ajustes.json` de la carpeta de datos. Al encender, la consola del host también muestra
 el código QR. Con `--no-panel` no se abre la ventana del panel; con `--start` arranca ya
 encendida; con `--hotspot` se elige la red propia.
 
@@ -321,8 +373,10 @@ host-rs/src/       host en Rust: capture.rs (DDA y cursor), convert.rs (BGRA→N
                    mfenc.rs (QuickSync), pipeline.rs (hilo de captura), server.rs (HTTPS/WS, panel,
                    encendido y seguridad), vdd.rs + display.rs (monitor virtual), certs.rs,
                    input.rs (táctil, ratón y lápiz), hotspot.rs (red propia), prefs.rs (ajustes),
-                   sys.rs (red, QR, ventanas), h264.rs
+                   sys.rs (red, QR, ventanas), tray.rs (icono junto al reloj), h264.rs
 host-rs/build.rs + xtendedview.rc   icono y nombre del ejecutable (con rc.exe del SDK de Windows)
+installer/xtendedview.iss  instalador de Windows (Inno Setup 6); lo genera tools/instalador.ps1 en dist/,
+                   junto con la versión portátil (.zip, con installer/portable.txt)
 assets/            icono de XtendedView (xtendedview.png de 1024 px y xtendedview.ico) y logotipo de
                    texto para tema oscuro y claro (logo-tema-*.png)
 tools/iconos.ps1   genera todos los iconos a partir de una imagen (después, recompilar)

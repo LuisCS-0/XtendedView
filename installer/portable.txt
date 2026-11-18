@@ -1,0 +1,13 @@
+XtendedView portátil
+====================
+
+No hace falta instalarlo: abre xtendedview.exe. Este archivo hace que guarde sus datos
+(certificados, código de emparejamiento, ajustes y registro) en la carpeta «datos», aquí al lado,
+en vez de en tu perfil de usuario. Así puedes llevarlo en un USB. No lo borres.
+
+La primera vez, Windows preguntará si permites que XtendedView use la red: acepta (marca también
+las redes públicas si vas a usar la red propia, que Windows trata como pública), o los dispositivos
+no podrán conectarse.
+
+XtendedView se queda junto al reloj: un clic abre el panel y con el botón derecho puedes salir.
+Para quitarlo, basta con borrar la carpeta.

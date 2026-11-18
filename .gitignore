@@ -2,3 +2,5 @@
 certs/
 __pycache__/
 host-rs/target/
+# Instaladores generados por tools/instalador.ps1
+dist/

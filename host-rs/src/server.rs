@@ -16,7 +16,7 @@ use crate::clock::now_ms;
 use crate::display::{self, Target};
 use crate::hotspot::Hotspot;
 use crate::input::{Injector, PointerEvent, Rect};
-use crate::pipeline::{Capture, Controller, Event, Settings};
+use crate::pipeline::{Capture, Controller, Event, Flow, Settings};
 use crate::prefs::{self, DevicePrefs, Prefs};
 use crate::sys;
 use crate::vdd::Vdd;
@@ -30,7 +30,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -143,6 +143,9 @@ struct StreamInfo {
 struct Virtual {
     index: u32,
     name: String,
+    /// Modo y posición que se le pusieron, para devolvérselos si Windows los cambia al conectar
+    /// o quitar el monitor de otro dispositivo.
+    placed: Option<(Target, (i32, i32))>,
 }
 
 /// Codificador de un dispositivo dentro de la captura de un monitor.
@@ -151,6 +154,7 @@ struct Stream {
     output: String,
     settings: Settings,
     ctrl: Controller,
+    flow: Arc<Flow>,
     forward: tokio::task::JoinHandle<()>,
 }
 
@@ -180,6 +184,17 @@ impl Session {
         self.send(json!({"t": "bye", "reason": reason, "retry": retry}));
         let _ = self.tx.send(Message::Close(None));
     }
+
+    /// Despedida cuando el código deja de valer (apagada o código nuevo): el visor olvida el
+    /// suyo y pide el nuevo.
+    fn bye_new_code(&self, reason: &str) {
+        let _ = self.tx.send(bye_new_code(reason));
+        let _ = self.tx.send(Message::Close(None));
+    }
+}
+
+fn bye_new_code(reason: &str) -> Message {
+    Message::text(json!({"t": "bye", "reason": reason, "retry": false, "askKey": true}).to_string())
 }
 
 #[derive(Default)]
@@ -241,6 +256,12 @@ fn stacked_position(main: Rect, (w, h): (u32, u32), side: &str, others: &[Rect])
     }
 }
 
+/// Fecha y hora local para mostrar ("18/11/2026 23:10").
+fn now_text() -> String {
+    let t = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+    format!("{:02}/{:02}/{} {:02}:{:02}", t.day(), u8::from(t.month()), t.year(), t.hour(), t.minute())
+}
+
 /// Un dispositivo esperando a que lo acepten en el panel.
 struct Pending {
     id: u64,
@@ -280,6 +301,8 @@ pub struct App {
     /// Turno para comprobar el código de emparejamiento (ver `check_key`).
     auth_turn: Mutex<()>,
     auth_waiting: AtomicU32,
+    /// Ventanas del panel abiertas (las de la página, no las de los guiones de pruebas).
+    panels: AtomicUsize,
     rejected: StdMutex<HashSet<IpAddr>>,
     /// Dispositivos aceptados en el panel desde que se encendió.
     approved: StdMutex<HashSet<String>>,
@@ -288,8 +311,21 @@ pub struct App {
     changed: Notify,
 }
 
+/// Con más de estos milisegundos de imágenes sin confirmar, se deja de codificar para ese
+/// dispositivo hasta que se pone al día (ver `pipeline::Flow`). Normalmente hay 2-3 imágenes en
+/// camino; con un parón de la Wi-Fi, cuanto menos se acumule, antes vuelve a ir al día.
+const PAUSE_AFTER_MS: u32 = 100;
+
+/// Imágenes sin confirmar a partir de las cuales se espera. Con la imagen suave el dispositivo
+/// confirma al recibir y retiene `smooth_ms` a propósito: si el ordenador esperase antes de que
+/// se acabe ese colchón, dejaría de capturar justo lo que el colchón debía tapar.
+fn pause_limit(fps: u32, smooth_ms: u32) -> u32 {
+    (fps * (PAUSE_AFTER_MS + smooth_ms) / 1000).max(4)
+}
+
 /// Lo que ve el dispositivo si intenta conectarse con la pantalla apagada.
-const OFF_REASON: &str = "La pantalla está apagada en el ordenador. Enciéndela desde el panel y vuelve a escanear el código QR.";
+const OFF_REASON: &str =
+    "La pantalla está apagada en el ordenador. Al encenderla habrá un código nuevo: escanea el QR o escríbelo aquí.";
 
 /// Cómo se llama cada conexión en el panel.
 fn via_name(via: &str) -> &'static str {
@@ -332,6 +368,7 @@ impl App {
             power_lock: Mutex::new(()),
             auth_turn: Mutex::new(()),
             auth_waiting: AtomicU32::new(0),
+            panels: AtomicUsize::new(0),
             rejected: StdMutex::new(HashSet::new()),
             approved: StdMutex::new(HashSet::new()),
             pending: StdMutex::new(Vec::new()),
@@ -441,7 +478,15 @@ impl App {
         let _ = tx.send(Message::text(
             json!({"t": "wait", "message": "Acepta la conexión en el panel del ordenador…"}).to_string(),
         ));
-        sys::flash_panel_window("XtendedView");
+        if self.panels.load(Ordering::Relaxed) == 0 {
+            // Sin el panel abierto, una notificación de Windows; al pulsarla se abre.
+            crate::tray::notify(
+                &format!("{} quiere conectarse", client.name),
+                &format!("Por {}. Pulsa aquí para abrir el panel y aceptarlo, rechazarlo o bloquearlo.", via_name(via)),
+            );
+        } else {
+            sys::flash_panel_window("XtendedView");
+        }
         self.changed.notify_waiters();
 
         let deadline = tokio::time::sleep(APPROVAL_TIMEOUT);
@@ -463,18 +508,106 @@ impl App {
         decision
     }
 
-    /// Respuesta del panel a un dispositivo que espera.
-    fn decide(&self, id: u64, accept: bool) -> Result<String> {
+    /// Respuesta del panel a un dispositivo que espera: aceptarlo, rechazarlo o bloquearlo (no
+    /// volverá a poder pedir conexión hasta que se desbloquee en Ajustes).
+    fn decide(&self, id: u64, accept: bool, block: bool) -> Result<String> {
         let mut pending = self.pending.lock().unwrap();
         let p = pending.iter_mut().find(|p| p.id == id).context("ese dispositivo ya no está esperando")?;
+        let accept = accept && !block;
         if accept {
             self.approved.lock().unwrap().insert(p.device.clone());
+        }
+        if block {
+            let mut prefs = self.prefs.lock().unwrap();
+            prefs.blocked.insert(
+                p.device.clone(),
+                prefs::Blocked { name: p.name.clone(), ip: p.ip.to_string(), since: now_text() },
+            );
+            self.save_prefs(&prefs);
         }
         if let Some(r) = p.reply.take() {
             let _ = r.send(accept);
         }
-        log::info!("{} {}", p.name, if accept { "aceptado" } else { "rechazado" });
-        Ok(format!("{} {}", p.name, if accept { "aceptado" } else { "rechazado" }))
+        let what = if block { "bloqueado" } else if accept { "aceptado" } else { "rechazado" };
+        log::info!("{} {what}", p.name);
+        Ok(format!("{} {what}", p.name))
+    }
+
+    /// Quita un dispositivo de los bloqueados.
+    fn unblock(&self, device: &str) -> Result<String> {
+        let mut prefs = self.prefs.lock().unwrap();
+        let b = prefs.blocked.remove(device).context("ese dispositivo no está bloqueado")?;
+        self.save_prefs(&prefs);
+        log::info!("{} desbloqueado", b.name);
+        Ok(format!("{} desbloqueado: podrá volver a pedir conexión", b.name))
+    }
+
+    fn is_blocked(&self, device: &str) -> bool {
+        self.prefs.lock().unwrap().blocked.contains_key(device)
+    }
+
+    /// Se ha cerrado la última conexión del panel. Con «Cerrar del todo al cerrar el panel»
+    /// (activado de serie), si se ha cerrado la ventana se apaga como con el botón Apagar y el
+    /// programa termina; si no, sigue junto al reloj.
+    ///
+    /// Al recargar la página también se cierra la conexión, pero la ventana sigue abierta y el
+    /// panel vuelve en seguida. Así que se mira si la ventana existe: cerrada, se sale en menos de
+    /// medio segundo (sin dejar la pantalla de los dispositivos puesta unos segundos más). Si no se
+    /// encuentra la ventana (el panel en una pestaña normal del navegador), se espera hasta 3 s.
+    fn panel_closed(self: Arc<Self>) {
+        if !self.prefs().quit_on_close {
+            return;
+        }
+        tokio::spawn(async move {
+            let start = Instant::now();
+            loop {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if self.panels.load(Ordering::SeqCst) > 0 {
+                    return; // ha vuelto (recarga)
+                }
+                let elapsed = start.elapsed();
+                let window_gone = elapsed >= Duration::from_millis(300) && !sys::panel_window_open("XtendedView");
+                if window_gone || elapsed >= Duration::from_secs(3) {
+                    break;
+                }
+            }
+            if self.prefs().quit_on_close {
+                log::info!("Panel cerrado: se apaga y se sale");
+                self.quit().await;
+            }
+        });
+    }
+
+    /// Sale del programa dejando el ordenador como estaba, lo antes posible: primero lo que se ve
+    /// (avisar a los dispositivos y quitar sus monitores virtuales, todos a la vez), después la
+    /// red propia. Las capturas y los codificadores no se cierran uno a uno: al terminar el
+    /// proceso, Windows los libera.
+    pub async fn quit(self: &Arc<Self>) -> ! {
+        let started = Instant::now();
+        self.on.store(false, Ordering::SeqCst);
+        let virtuals: Vec<u32> = {
+            let hub = self.hub.lock().await;
+            for s in &hub.sessions {
+                s.bye_new_code(
+                    "XtendedView se ha cerrado en el ordenador. Al volver a abrirlo habrá un código nuevo: escanea el QR o escríbelo aquí.",
+                );
+            }
+            hub.sessions.iter().filter_map(|s| s.virt.as_ref().map(|v| v.index)).collect()
+        };
+        if let (false, Ok(vdd)) = (virtuals.is_empty(), self.vdd()) {
+            let _ = tokio::task::spawn_blocking(move || {
+                for index in virtuals {
+                    let _ = vdd.remove(index);
+                }
+            })
+            .await;
+        }
+        self.sync_hotspot().await; // apagada: cierra la red propia si estaba
+        crate::tray::remove();
+        // Un instante para que salgan las despedidas a los dispositivos.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        log::info!("Cerrado en {} ms", started.elapsed().as_millis());
+        std::process::exit(0);
     }
 
     // -------------------------------------------------------------- encendido
@@ -503,7 +636,9 @@ impl App {
                 let mut hub = self.hub.lock().await;
                 self.on.store(false, Ordering::SeqCst);
                 for s in &hub.sessions {
-                    s.bye("La pantalla se ha apagado desde el ordenador.", false);
+                    s.bye_new_code(
+                        "La pantalla se ha apagado desde el ordenador. Al encenderla habrá un código nuevo: escanea el QR o escríbelo aquí.",
+                    );
                 }
                 while !hub.sessions.is_empty() {
                     self.remove_session(&mut hub, 0).await;
@@ -758,7 +893,9 @@ impl App {
         if hub.sessions[i].virt.is_none() {
             let (index, out) = tokio::task::spawn_blocking(move || display::create_virtual(&vdd)).await??;
             log::info!("Monitor virtual conectado: {} (índice {index} en Parsec VDD)", out.name);
-            hub.sessions[i].virt = Some(Virtual { index, name: out.name });
+            hub.sessions[i].virt = Some(Virtual { index, name: out.name, placed: None });
+            // Al añadirlo, Windows puede haber cambiado el modo o la posición de los demás.
+            self.restore_virtuals(hub, true).await;
         }
         let name = hub.sessions[i].virt.as_ref().map(|v| v.name.clone()).unwrap_or_default();
         // Otros monitores virtuales en el mismo lado.
@@ -770,7 +907,10 @@ impl App {
             .filter_map(|(_, s)| s.virt.as_ref().map(|v| v.name.clone()))
             .collect();
         let (w, h, fps, side) = (req.w, req.h, req.fps, req.side.clone());
-        tokio::task::spawn_blocking(move || -> Result<(OutputInfo, Target, bool)> {
+        // La posición arrastrada en el panel, si se eligió; si no, en su lado, por fuera de los demás.
+        let dp = self.prefs().device(&hub.sessions[i].device);
+        let (chosen, dpi) = (dp.position, dp.dpi);
+        let result = tokio::task::spawn_blocking(move || -> Result<(OutputInfo, Target, bool)> {
             let (target, exact) =
                 display::best_target(&display::modes(&name), w, h, fps).context("el monitor virtual no tiene modos")?;
             let mut changed = display::current(&name) != Some(target);
@@ -782,7 +922,10 @@ impl App {
             // El monitor principal es el que está en el origen del escritorio.
             let main = outputs.iter().find(|o| o.name != name && o.rect.x == 0 && o.rect.y == 0);
             let others: Vec<Rect> = outputs.iter().filter(|o| same_side.contains(&o.name)).map(|o| o.rect).collect();
-            let at = main.map(|m| stacked_position(m.rect, dims, &side, &others));
+            let at = match chosen {
+                Some([x, y]) => Some((x, y)),
+                None => main.map(|m| stacked_position(m.rect, dims, &side, &others)),
+            };
             if let Some(p) = at {
                 if display::position(&name) != Some(p) {
                     display::place(&name, p)?;
@@ -790,13 +933,22 @@ impl App {
                 }
             }
             let out = display::wait_output(&name, dims, at)?;
+            // Siempre (también «la recomendada»): Windows recuerda la escala por monitor virtual
+            // y otro dispositivo pudo dejar la suya en este.
+            if let Err(e) = display::set_scale(&name, dpi) {
+                log::warn!("Escala de {name}: {e:#}");
+            }
             if changed {
                 // Dar tiempo a Windows a terminar el cambio antes de empezar a capturar.
                 std::thread::sleep(Duration::from_millis(500));
             }
             Ok((out, target, exact))
         })
-        .await?
+        .await??;
+        if let Some(v) = hub.sessions[i].virt.as_mut() {
+            v.placed = Some((result.1, (result.0.rect.x, result.0.rect.y)));
+        }
+        Ok(result)
     }
 
     async fn remove_virtual(&self, hub: &mut Hub, i: usize) {
@@ -807,6 +959,58 @@ impl App {
                 let _ = tokio::task::spawn_blocking(move || vdd.remove(index)).await;
             }
             log::info!("Monitor virtual {} quitado", v.name);
+            // Al quitarlo, Windows puede cambiar el modo de los demás. Las posiciones no se
+            // fuerzan: Windows junta los monitores para que no quede un hueco.
+            self.restore_virtuals(hub, false).await;
+        }
+    }
+
+    /// Devuelve a los monitores virtuales de los dispositivos el modo que tenían (y, si
+    /// `positions`, su sitio). Al conectar o quitar un monitor, Windows aplica la última
+    /// disposición que recuerda para ese conjunto de monitores, que puede ser otra; sin esto,
+    /// la captura de los demás dispositivos veía otra resolución y se cortaba. Después
+    /// actualiza los rectángulos del táctil, por si algún monitor se ha movido.
+    async fn restore_virtuals(&self, hub: &mut Hub, positions: bool) {
+        let wanted: Vec<(String, Target, (i32, i32))> = hub
+            .sessions
+            .iter()
+            .filter_map(|s| s.virt.as_ref())
+            .filter_map(|v| v.placed.map(|(t, at)| (v.name.clone(), t, at)))
+            .collect();
+        if wanted.is_empty() {
+            return;
+        }
+        let outputs = tokio::task::spawn_blocking(move || {
+            // Windows tarda un momento en aplicar su disposición tras conectar o quitar uno:
+            // se vigila durante un segundo.
+            let start = Instant::now();
+            while start.elapsed() < Duration::from_secs(1) {
+                std::thread::sleep(Duration::from_millis(100));
+                for (name, target, at) in &wanted {
+                    if display::current(name).is_some_and(|t| t != *target) {
+                        log::info!("Windows ha cambiado el modo de {name}: se le devuelve {target}");
+                        if let Err(e) = display::apply(name, *target) {
+                            log::warn!("{name}: {e:#}");
+                        }
+                    }
+                    if positions && display::position(name).is_some_and(|p| p != *at) {
+                        let _ = display::place(name, *at);
+                    }
+                }
+            }
+            capture::outputs().unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default();
+        let mut rects = self.rects.lock().unwrap();
+        for s in hub.sessions.iter_mut() {
+            let Some(out) = s.stream.as_ref().and_then(|st| outputs.iter().find(|o| o.name == st.output)) else {
+                continue;
+            };
+            rects.insert(s.conn, out.rect);
+            if let Some((_, at)) = s.virt.as_mut().and_then(|v| v.placed.as_mut()) {
+                *at = (out.rect.x, out.rect.y);
+            }
         }
     }
 
@@ -819,7 +1023,12 @@ impl App {
     fn send_viewer_settings(&self, s: &Session) {
         let p = self.prefs();
         let d = p.device(&s.device);
-        s.send(json!({"t": "settings", "stats": d.stats, "measure": p.measure, "fullscreen": d.fullscreen}));
+        // Por cable (o desde este mismo ordenador) no hay parones que tapar.
+        let smooth_ms = if matches!(s.via, "local" | "own") { p.smoothing_ms() } else { 0 };
+        if let Some(st) = &s.stream {
+            st.flow.set_limit(pause_limit(st.settings.fps, smooth_ms));
+        }
+        s.send(json!({"t": "settings", "stats": d.stats, "measure": p.measure, "fullscreen": d.fullscreen, "smoothMs": smooth_ms}));
     }
 
     /// Ajusta la captura de una sesión a su dispositivo y a sus ajustes.
@@ -909,11 +1118,13 @@ impl App {
         let (conn, acked, host_stats, name) = (s.conn, s.acked.clone(), s.host_stats.clone(), s.client.name.clone());
         let capture = hub.captures.entry(mon.name.clone()).or_insert_with(|| Capture::start(mon.index));
         let (ev_tx, ev_rx) = mpsc::unbounded_channel();
-        let ctrl = capture.add(conn, settings.clone(), ev_tx);
+        // El límite definitivo (con el margen de la imagen suave) lo pone send_viewer_settings.
+        let flow = Arc::new(Flow::new(acked, pause_limit(settings.fps, 0)));
+        let ctrl = capture.add(conn, settings.clone(), ev_tx, flow.clone());
         let forward = tokio::spawn(forward(
             ev_rx,
             tx,
-            acked,
+            flow.clone(),
             ctrl.clone(),
             settings.clone(),
             extend,
@@ -922,7 +1133,7 @@ impl App {
             name,
         ));
         let s = &mut hub.sessions[i];
-        s.stream = Some(Stream { output: mon.name, settings, ctrl, forward });
+        s.stream = Some(Stream { output: mon.name, settings, ctrl, flow, forward });
         self.send_viewer_settings(s);
         self.changed.notify_waiters();
         Ok(())
@@ -1029,6 +1240,10 @@ impl App {
         let Some(i) = hub.index(conn) else { return };
         let s = &mut hub.sessions[i];
         s.viewer_stats = m.clone();
+        let worst = m["netMax"].as_f64().unwrap_or(0.0);
+        if worst >= 150.0 {
+            log::info!("{}: tirón de red, una imagen tardó {worst:.0} ms en llegar", s.client.name);
+        }
         if s.last_log.is_some_and(|t| t.elapsed() < Duration::from_secs(5)) {
             return;
         }
@@ -1043,14 +1258,29 @@ impl App {
 
     // -------------------------------------------------------------- panel
 
-    /// Ajuste general (de momento, medir la latencia en todos los dispositivos).
+    /// Ajuste general: medir la latencia en todos los dispositivos, o la imagen más suave por Wi-Fi.
     async fn set_pref(self: &Arc<Self>, key: &str, value: &Value) -> Result<()> {
-        if key != "measure" {
-            bail!("ajuste desconocido «{key}»");
-        }
         {
             let mut p = self.prefs.lock().unwrap();
-            p.measure = value.as_bool().unwrap_or(p.measure);
+            match key {
+                "measure" => p.measure = value.as_bool().unwrap_or(p.measure),
+                "quitOnClose" => p.quit_on_close = value.as_bool().unwrap_or(p.quit_on_close),
+                "theme" => {
+                    let theme = value.as_str().unwrap_or("");
+                    if !prefs::THEMES.contains(&theme) {
+                        bail!("tema desconocido «{theme}»");
+                    }
+                    p.theme = theme.into();
+                }
+                "smoothing" => {
+                    let level = value.as_str().unwrap_or("");
+                    if !prefs::SMOOTHING.iter().any(|(name, _)| *name == level) {
+                        bail!("nivel de suavizado desconocido «{level}»");
+                    }
+                    p.smoothing = level.into();
+                }
+                _ => bail!("ajuste desconocido «{key}»"),
+            }
             self.save_prefs(&p);
         }
         let hub = self.hub.lock().await;
@@ -1077,10 +1307,55 @@ impl App {
                     self.send_viewer_settings(s);
                 }
             }
+            "position" => self.place_device(device).await,
+            "dpi" => self.scale_device(device).await,
             _ => self.reconfigure_device(device).await,
         }
         self.changed.notify_waiters();
         Ok(())
+    }
+
+    /// Cambia la escala de Windows de la pantalla adicional de un dispositivo (sin cortar la imagen:
+    /// la resolución no cambia).
+    async fn scale_device(self: &Arc<Self>, device: &str) {
+        let name = {
+            let hub = self.hub.lock().await;
+            hub.sessions.iter().find(|s| s.device == device).and_then(|s| s.virt.as_ref().map(|v| v.name.clone()))
+        };
+        let Some(name) = name else { return };
+        let dpi = self.prefs().device(device).dpi;
+        match tokio::task::spawn_blocking(move || display::set_scale(&name, dpi)).await {
+            Ok(Ok(())) => log::info!("Escala de la pantalla adicional: {}", if dpi == 0 { "la recomendada".into() } else { format!("{dpi} %") }),
+            Ok(Err(e)) => log::warn!("No se pudo cambiar la escala: {e:#}"),
+            Err(_) => {}
+        }
+    }
+
+    /// Lleva el monitor virtual de un dispositivo a la posición elegida en el panel. Con una
+    /// posición, solo se mueve (la imagen sigue sin cortes); sin ella («Colocar sola»), se vuelve
+    /// a preparar en su lado.
+    async fn place_device(self: &Arc<Self>, device: &str) {
+        let mut hub = self.hub.lock().await;
+        let Some(i) = hub.sessions.iter().position(|s| s.device == device) else { return };
+        let Some(name) = hub.sessions[i].virt.as_ref().map(|v| v.name.clone()) else { return };
+        match self.prefs().device(device).position {
+            Some([x, y]) => {
+                let moved = tokio::task::spawn_blocking(move || display::place(&name, (x, y))).await;
+                match moved {
+                    Ok(Ok(())) => log::info!("{}: pantalla colocada en ({x}, {y})", hub.sessions[i].client.name),
+                    Ok(Err(e)) => log::warn!("No se pudo mover la pantalla: {e:#}"),
+                    Err(_) => {}
+                }
+                // Windows puede haber recolocado algo: se actualizan posiciones y táctil.
+                self.restore_virtuals(&mut hub, false).await;
+            }
+            None => {
+                hub.sessions[i].request = None; // obliga a volver a aplicarlo
+                if let Err(e) = self.apply(&mut hub, i).await {
+                    log::error!("No se pudo recolocar la pantalla: {e:#}");
+                }
+            }
+        }
     }
 
     /// Acciones del panel. Devuelve un mensaje para mostrar.
@@ -1124,7 +1399,7 @@ impl App {
                 self.approved.lock().unwrap().clear();
                 let hub = self.hub.lock().await;
                 for s in &hub.sessions {
-                    s.bye("El código ha cambiado: vuelve a escanear el QR.", false);
+                    s.bye_new_code("El código ha cambiado. Escanea el QR nuevo o escribe aquí el código:");
                 }
                 log::info!("Código de emparejamiento nuevo: {}", prefs::pretty_key(&key));
                 Ok(format!("Código nuevo: {}", prefs::pretty_key(&key)))
@@ -1242,6 +1517,8 @@ impl App {
                     "stream": s.info.as_ref().map(|i| json!({
                         "extend": i.extend, "width": i.width, "height": i.height, "fps": i.fps,
                         "portrait": i.portrait, "exact": i.exact, "register": i.register, "monitor": i.monitor,
+                        // Escala de Windows actual de su pantalla adicional.
+                        "dpi": s.virt.as_ref().filter(|_| i.extend).and_then(|v| display::scale(&v.name)),
                     })),
                     "viewerStats": s.viewer_stats,
                     "hostStats": s.host_stats.lock().unwrap().clone(),
@@ -1254,11 +1531,29 @@ impl App {
             .enumerate()
             .map(|(i, o)| json!({"index": i, "name": o.name, "w": o.rect.w, "h": o.rect.h}))
             .collect();
+        // Disposición del escritorio para colocar las pantallas arrastrándolas: los monitores
+        // del ordenador y los de los dispositivos, con su posición.
+        let layout: Vec<Value> = capture::outputs()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|o| {
+                let owner = hub.sessions.iter().find(|s| s.virt.as_ref().is_some_and(|v| v.name == o.name));
+                json!({
+                    "name": o.name, "x": o.rect.x, "y": o.rect.y, "w": o.rect.w, "h": o.rect.h,
+                    "primary": o.rect.x == 0 && o.rect.y == 0,
+                    "device": owner.map(|s| s.device.clone()), "deviceName": owner.map(|s| s.client.name.clone()),
+                })
+            })
+            .collect();
         drop(hub);
         json!({
             "t": "state",
             "on": on,
-            "prefs": {"connections": p.connections, "measure": p.measure},
+            "prefs": {
+                "connections": p.connections, "measure": p.measure, "smoothing": p.smoothing,
+                "theme": p.theme, "quitOnClose": p.quit_on_close,
+            },
+            "blocked": p.blocked.iter().map(|(device, b)| json!({"device": device, "name": b.name, "ip": b.ip, "since": b.since})).collect::<Vec<_>>(),
             "code": on.then(|| prefs::pretty_key(&self.key())),
             "connections": {"local": local, "own": own, "cable": cable},
             "setupUrl": self.setup_url(),
@@ -1267,6 +1562,7 @@ impl App {
             "maxDevices": MAX_DEVICES,
             "vdd": vdd,
             "monitors": monitors,
+            "layout": layout,
             "ports": {"https": self.args.port, "http": self.args.http_port},
             "caFingerprint": self.ca_fingerprint,
         })
@@ -1321,7 +1617,7 @@ fn percentile(v: &mut [f64], p: f64) -> f64 {
 async fn forward(
     mut rx: mpsc::UnboundedReceiver<Event>,
     tx: mpsc::UnboundedSender<Message>,
-    acked: Arc<AtomicU32>,
+    flow: Arc<Flow>,
     ctrl: Controller,
     s: Settings,
     extend: bool,
@@ -1329,7 +1625,9 @@ async fn forward(
     host_stats: Arc<StdMutex<Value>>,
     name: String,
 ) {
-    let limit = ((s.fps as f64 * max_inflight_ms / 1000.0).round() as u32).max(3);
+    let acked = flow.acked.clone();
+    // Red de seguridad: normalmente la captura ya ha dejado de codificar mucho antes (`Flow`).
+    let hard_limit = (s.fps as f64 * max_inflight_ms / 1000.0).round() as u32;
     let send_json = |v: Value| {
         let _ = tx.send(Message::text(v.to_string()));
     };
@@ -1364,6 +1662,7 @@ async fn forward(
                         seq += 1;
                         frames += 1;
                         encode_ms.push(e);
+                        let limit = hard_limit.max(flow.limit() + 3);
                         let congested = last_sent.saturating_sub(acked.load(Ordering::Relaxed)) > limit;
                         if congested || (waiting_key && !key) {
                             waiting_key = true;
@@ -1385,11 +1684,13 @@ async fn forward(
                         sent += 1;
                         keys += key as u32;
                         last_sent = seq;
+                        flow.sent.store(seq, Ordering::Relaxed);
                         if tx.send(Message::binary(buf)).is_err() {
                             break;
                         }
                     }
-                    Event::Cursor { x, y, visible } => send_json(json!({"t": "cursor", "x": x, "y": y, "v": visible})),
+                    // Con la hora (del ordenador) para que el modo suave lo mueva a la par que la imagen.
+                    Event::Cursor { x, y, visible } => send_json(json!({"t": "cursor", "x": x, "y": y, "v": visible, "ms": now_ms()})),
                     Event::CursorShape(shape) => send_json(json!({
                         "t": "cursorShape", "w": shape.width, "h": shape.height,
                         "rgba": base64::engine::general_purpose::STANDARD.encode(&shape.rgba),
@@ -1405,8 +1706,15 @@ async fn forward(
                     ctrl.keyframe();
                     last_key_request = Instant::now();
                 }
+                let paused = flow.paused_ms.swap(0, Ordering::Relaxed);
+                if paused >= 100 || dropped > 0 {
+                    log::info!(
+                        "{name}: el dispositivo se ha retrasado (red lenta o parada): {paused} ms esperando{}",
+                        if dropped > 0 { format!(", {dropped} imágenes descartadas") } else { String::new() }
+                    );
+                }
                 let stats = json!({
-                    "t": "stats", "encFps": frames, "sentFps": sent, "dropped": dropped, "keys": keys,
+                    "t": "stats", "encFps": frames, "sentFps": sent, "dropped": dropped, "keys": keys, "pausedMs": paused,
                     "mbps": (bytes as f64 * 8.0 / 1e6 * 100.0).round() / 100.0,
                     "inflight": last_sent.saturating_sub(acked.load(Ordering::Relaxed)),
                     "encMs50": (percentile(&mut encode_ms, 0.5) * 10.0).round() / 10.0,
@@ -1649,7 +1957,7 @@ async fn websocket(app: Arc<App>, mut io: Box<dyn Io>, headers: &HashMap<String,
     )
     .await?;
     let ws = WebSocketStream::from_partially_read(io, leftover, Role::Server, None).await;
-    let (mut sink, stream) = ws.split();
+    let (mut sink, mut stream) = ws.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
     let writer = tokio::spawn(async move {
         while let Some(m) = rx.recv().await {
@@ -1661,10 +1969,26 @@ async fn websocket(app: Arc<App>, mut io: Box<dyn Io>, headers: &HashMap<String,
         let _ = sink.close().await;
     });
     match role.as_str() {
-        "panel" => panel_session(app, stream, tx).await,
-        _ => viewer_session(app, stream, tx, peer, role).await,
+        "panel" => {
+            // La página del panel se identifica con ui=1 (los guiones de pruebas no): solo esas
+            // cuentan como ventanas abiertas.
+            let ui = query.split('&').any(|kv| kv == "ui=1");
+            if ui {
+                app.panels.fetch_add(1, Ordering::SeqCst);
+            }
+            panel_session(app.clone(), &mut stream, tx).await;
+            if ui && app.panels.fetch_sub(1, Ordering::SeqCst) == 1 {
+                app.clone().panel_closed();
+            }
+        }
+        _ => viewer_session(app, &mut stream, tx, peer, role).await,
     }
     let _ = writer.await;
+    // Cierre ordenado: se sigue leyendo hasta que el navegador conteste al cierre. Si se cortara
+    // con mensajes suyos sin leer (los de reloj que manda mientras se comprueba el código), el
+    // sistema enviaría un RST y el navegador podría perder el último aviso («código incorrecto»,
+    // «apagada»…): el visor volvería a intentarlo sin parar con el código viejo.
+    let _ = timeout(Duration::from_secs(2), async { while let Some(Ok(_)) = stream.next().await {} }).await;
     Ok(())
 }
 
@@ -1701,7 +2025,7 @@ fn device_id(hello: &Value, peer: IpAddr) -> String {
     }
 }
 
-async fn viewer_session(app: Arc<App>, mut stream: WsStream, tx: mpsc::UnboundedSender<Message>, peer: IpAddr, role: String) {
+async fn viewer_session(app: Arc<App>, stream: &mut WsStream, tx: mpsc::UnboundedSender<Message>, peer: IpAddr, role: String) {
     let conn = app.next_id.fetch_add(1, Ordering::Relaxed);
     let acked = Arc::new(AtomicU32::new(0));
     let send = |v: Value| {
@@ -1711,10 +2035,14 @@ async fn viewer_session(app: Arc<App>, mut stream: WsStream, tx: mpsc::Unbounded
         let _ = tx.send(Message::text(json!({"t": "bye", "reason": reason, "retry": retry}).to_string()));
         let _ = tx.send(Message::Close(None));
     };
+    let bye_off = || {
+        let _ = tx.send(bye_new_code(OFF_REASON));
+        let _ = tx.send(Message::Close(None));
+    };
     log::debug!("Conectado {peer} ({role})");
     // Aceptado en esta conexión: los "hello" siguientes (al girar o plegar) solo actualizan.
     let mut accepted = false;
-    while let Some(v) = next_json(&mut stream).await {
+    while let Some(v) = next_json(stream).await {
         let kind = v["t"].as_str().unwrap_or("");
         if kind == "ping" {
             pong(&tx, &v);
@@ -1725,7 +2053,7 @@ async fn viewer_session(app: Arc<App>, mut stream: WsStream, tx: mpsc::Unbounded
         }
         match kind {
             "hello" if !app.is_on() => {
-                bye(OFF_REASON, false);
+                bye_off();
                 break;
             }
             "hello" => {
@@ -1747,9 +2075,18 @@ async fn viewer_session(app: Arc<App>, mut stream: WsStream, tx: mpsc::Unbounded
                             break;
                         }
                     }
+                    if app.is_blocked(&device) {
+                        log::info!("Dispositivo bloqueado ({peer}): rechazado sin preguntar");
+                        bye("Este dispositivo está bloqueado en el ordenador.", false);
+                        break;
+                    }
                     let client = Client::parse(&v, peer);
-                    match app.wait_approval(&device, &client, via, &mut stream, &tx).await {
+                    match app.wait_approval(&device, &client, via, stream, &tx).await {
                         Some(true) => accepted = true,
+                        Some(false) if app.is_blocked(&device) => {
+                            bye("El ordenador ha bloqueado este dispositivo.", false);
+                            break;
+                        }
                         Some(false) => {
                             bye("El ordenador no ha aceptado la conexión.", true);
                             break;
@@ -1759,7 +2096,7 @@ async fn viewer_session(app: Arc<App>, mut stream: WsStream, tx: mpsc::Unbounded
                 }
                 if let Err(e) = app.attach(conn, &device, via, &tx, &acked, &v, peer).await {
                     if !app.is_on() {
-                        bye(OFF_REASON, false);
+                        bye_off();
                         break;
                     }
                     log::error!("No se pudo conectar el dispositivo: {e:#}");
@@ -1784,6 +2121,16 @@ async fn viewer_session(app: Arc<App>, mut stream: WsStream, tx: mpsc::Unbounded
                 app.injector.lock().unwrap().wheel(dx, dy);
             }
             "stats" if accepted => app.client_stats(conn, &v).await,
+            // Su decodificador ha fallado y necesita una imagen completa.
+            "keyframe" if accepted => {
+                let hub = app.hub.lock().await;
+                if let Some(s) = hub.index(conn).map(|i| &hub.sessions[i]) {
+                    if let Some(st) = &s.stream {
+                        log::info!("{}: falló el decodificador del dispositivo; se le manda una imagen completa", s.client.name);
+                        st.ctrl.keyframe();
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -1793,7 +2140,7 @@ async fn viewer_session(app: Arc<App>, mut stream: WsStream, tx: mpsc::Unbounded
 
 /// Panel de control (solo desde este ordenador): recibe el estado cada segundo y en cuanto
 /// cambia algo, y envía ajustes y acciones.
-async fn panel_session(app: Arc<App>, mut stream: WsStream, tx: mpsc::UnboundedSender<Message>) {
+async fn panel_session(app: Arc<App>, stream: &mut WsStream, tx: mpsc::UnboundedSender<Message>) {
     let send_state = |app: Arc<App>, tx: mpsc::UnboundedSender<Message>| async move {
         let _ = tx.send(Message::text(app.state().await.to_string()));
     };
@@ -1801,7 +2148,7 @@ async fn panel_session(app: Arc<App>, mut stream: WsStream, tx: mpsc::UnboundedS
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
         tokio::select! {
-            v = next_json(&mut stream) => {
+            v = next_json(stream) => {
                 let Some(v) = v else { break };
                 let s = |k: &str| v[k].as_str().unwrap_or("").to_string();
                 let reply: Result<Option<String>> = match v["t"].as_str().unwrap_or("") {
@@ -1809,7 +2156,10 @@ async fn panel_session(app: Arc<App>, mut stream: WsStream, tx: mpsc::UnboundedS
                     "set" => app.set_pref(&s("key"), &v["value"]).await.map(|_| None),
                     "setDevice" => app.set_device(&s("device"), &s("key"), &v["value"]).await.map(|_| None),
                     "connection" => app.set_connection(&s("kind"), v["enabled"].as_bool().unwrap_or(false)).await.map(Some),
-                    "decide" => app.decide(v["id"].as_u64().unwrap_or(0), v["accept"].as_bool().unwrap_or(false)).map(Some),
+                    "decide" => app
+                        .decide(v["id"].as_u64().unwrap_or(0), v["accept"].as_bool().unwrap_or(false), v["block"].as_bool().unwrap_or(false))
+                        .map(Some),
+                    "unblock" => app.unblock(&s("device")).map(Some),
                     "action" => app.action(&s("name"), &s("device")).await.map(Some),
                     _ => continue,
                 };

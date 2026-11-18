@@ -61,6 +61,10 @@ features = [
     "Win32_UI_WindowsAndMessaging",
 ]
 
+[features]
+# Versión del instalador: sin ventana de consola (icono junto al reloj, registro en archivo).
+gui = []
+
 [profile.release]
 opt-level = 3
 debug = 1

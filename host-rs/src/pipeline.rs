@@ -18,7 +18,7 @@ use crate::h264;
 use crate::mfenc::{EncEvent, Encoder};
 use anyhow::{bail, Result};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -26,7 +26,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use windows::core::w;
 use windows::Win32::Graphics::Direct3D11::{ID3D11Texture2D, D3D11_TEXTURE2D_DESC};
 use windows::Win32::Media::MediaFoundation::{MFShutdown, MFStartup, MFSTARTUP_NOSOCKET, MF_VERSION};
-use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
+use windows::Win32::System::Com::{CoIncrementMTAUsage, CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 use windows::Win32::System::Threading::AvSetMmThreadCharacteristicsW;
 
 /// Lo que recibe un dispositivo.
@@ -48,8 +48,44 @@ pub enum Event {
     Error(String),
 }
 
+/// Control de flujo de un dispositivo: imágenes enviadas y confirmadas.
+///
+/// Si el dispositivo se retrasa (la Wi-Fi se para un momento), se deja de codificar para él
+/// hasta que se pone al día. Descartar imágenes ya codificadas sería peor: rompe la cadena de
+/// referencias de H.264 y obliga a mandar un keyframe, mucho más grande, justo cuando la red va
+/// peor. Al reanudar, la siguiente imagen ya trae la pantalla actual.
+pub struct Flow {
+    /// Número de la última imagen enviada (lo actualiza el servidor).
+    pub sent: AtomicU32,
+    /// Número de la última imagen que el dispositivo ha confirmado.
+    pub acked: Arc<AtomicU32>,
+    /// Imágenes sin confirmar a partir de las cuales se espera (cambia con la imagen suave).
+    limit: AtomicU32,
+    /// Milisegundos esperando (con algo que enviar) desde la última vez que se leyó.
+    pub paused_ms: AtomicU32,
+}
+
+impl Flow {
+    pub fn new(acked: Arc<AtomicU32>, limit: u32) -> Self {
+        let sent = AtomicU32::new(acked.load(Ordering::Relaxed));
+        Self { sent, acked, limit: AtomicU32::new(limit), paused_ms: AtomicU32::new(0) }
+    }
+
+    pub fn limit(&self) -> u32 {
+        self.limit.load(Ordering::Relaxed)
+    }
+
+    pub fn set_limit(&self, limit: u32) {
+        self.limit.store(limit, Ordering::Relaxed);
+    }
+
+    fn behind(&self) -> bool {
+        self.sent.load(Ordering::Relaxed).saturating_sub(self.acked.load(Ordering::Relaxed)) > self.limit()
+    }
+}
+
 enum Command {
-    Add { id: u64, settings: Settings, events: UnboundedSender<Event> },
+    Add { id: u64, settings: Settings, events: UnboundedSender<Event>, flow: Arc<Flow> },
     Remove(u64),
     KeyFrame(u64),
     Bitrate(u64, u32),
@@ -93,8 +129,8 @@ impl Capture {
     }
 
     /// Añade el codificador de un dispositivo. Los eventos le llegan por `events`.
-    pub fn add(&mut self, id: u64, settings: Settings, events: UnboundedSender<Event>) -> Controller {
-        let _ = self.cmd.send(Command::Add { id, settings, events });
+    pub fn add(&mut self, id: u64, settings: Settings, events: UnboundedSender<Event>, flow: Arc<Flow>) -> Controller {
+        let _ = self.cmd.send(Command::Add { id, settings, events, flow });
         self.sinks.push(id);
         Controller { cmd: self.cmd.clone(), id }
     }
@@ -118,13 +154,24 @@ impl Drop for Capture {
     }
 }
 
+/// COM y Media Foundation del hilo de captura.
+///
+/// Además, la primera vez los deja iniciados para todo el programa. Si no, al cerrar la última
+/// captura, COM descarga las DLL del codificador de Intel mientras sus hilos internos aún están
+/// terminando. Eso cerraba el programa de golpe (0xC0000005 en `mfx_mft_h264ve_64.dll`) en
+/// cuanto el único dispositivo conectado se iba o cambiaba de ajustes.
 struct MfGuard;
 
 impl MfGuard {
     fn new() -> Result<Self> {
+        static KEEP: std::sync::Once = std::sync::Once::new();
         unsafe {
             CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
             MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET)?;
+            KEEP.call_once(|| {
+                let _ = CoIncrementMTAUsage();
+                let _ = MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET);
+            });
         }
         Ok(Self)
     }
@@ -140,15 +187,48 @@ impl Drop for MfGuard {
 }
 
 fn reopen(gpu: &Gpu, stop: &AtomicBool) -> Result<Duplicator> {
+    let start = Instant::now();
+    let mut warned = false;
     loop {
         if stop.load(Ordering::Relaxed) {
             bail!("detenido");
         }
         match Duplicator::new(gpu) {
-            Ok(d) => return Ok(d),
-            // Escritorio seguro (UAC, bloqueo): se reintenta hasta que vuelva el normal.
-            Err(_) => std::thread::sleep(Duration::from_millis(200)),
+            Ok(d) => {
+                if warned {
+                    log::info!("Captura recuperada tras {:.1} s", start.elapsed().as_secs_f64());
+                }
+                return Ok(d);
+            }
+            // Escritorio seguro (UAC, bloqueo): se reintenta hasta que vuelva el normal. Si tarda,
+            // se deja dicho por qué (sin imagen, el dispositivo se queda esperando).
+            Err(e) => {
+                if !warned && start.elapsed() > Duration::from_secs(3) {
+                    log::warn!("No se puede capturar el monitor ({e:#}); se sigue intentando");
+                    warned = true;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
         }
+    }
+}
+
+/// Vuelve a abrir la duplicación tras perder el acceso, con la resolución de antes. Al conectar
+/// o quitar el monitor de otro dispositivo, Windows puede ponerle otro modo un momento, hasta
+/// que el servidor le devuelve el suyo: se espera unos segundos antes de darlo por perdido.
+fn reopen_same_size(gpu: &Gpu, stop: &AtomicBool, size: (u32, u32)) -> Result<Duplicator> {
+    let start = Instant::now();
+    loop {
+        let dup = reopen(gpu, stop)?;
+        if (dup.width, dup.height) == size {
+            return Ok(dup);
+        }
+        if start.elapsed() > Duration::from_secs(4) {
+            bail!("ha cambiado la resolución del monitor; vuelve a conectar");
+        }
+        log::debug!("captura: el monitor está a {}x{}; se espera a que vuelva a {}x{}", dup.width, dup.height, size.0, size.1);
+        drop(dup);
+        std::thread::sleep(Duration::from_millis(200));
     }
 }
 
@@ -166,6 +246,9 @@ struct Sink {
     id: u64,
     s: Settings,
     events: UnboundedSender<Event>,
+    flow: Arc<Flow>,
+    /// Desde cuándo espera a que el dispositivo se ponga al día.
+    paused_since: Option<Instant>,
     enc: Encoder,
     conv: Option<Converter>,
     interval: Duration,
@@ -182,7 +265,7 @@ struct Sink {
 }
 
 impl Sink {
-    fn new(gpu: &Gpu, id: u64, s: Settings, events: UnboundedSender<Event>) -> Result<Self> {
+    fn new(gpu: &Gpu, id: u64, s: Settings, events: UnboundedSender<Event>, flow: Arc<Flow>) -> Result<Self> {
         let enc = Encoder::new(&gpu.device, s.width, s.height, s.fps, s.bitrate)?;
         let interval = Duration::from_secs_f64(1.0 / s.fps.max(1) as f64);
         Ok(Self {
@@ -190,6 +273,8 @@ impl Sink {
             duration_100ns: (10_000_000 / s.fps.max(1)) as i64,
             s,
             events,
+            flow,
+            paused_since: None,
             enc,
             conv: None,
             interval,
@@ -209,9 +294,24 @@ impl Sink {
         self.pending.back().is_some_and(|&(_, c)| now_ms() - c < 200.0)
     }
 
-    /// Quiere una imagen ahora: el codificador la ha pedido y toca por ritmo de fotogramas.
+    /// Quiere una imagen ahora: el codificador la ha pedido, toca por ritmo de fotogramas y el
+    /// dispositivo no va atrasado.
     fn ready(&self) -> bool {
-        self.need > 0 && self.last_feed.elapsed() >= self.interval
+        self.need > 0 && self.last_feed.elapsed() >= self.interval && !self.flow.behind()
+    }
+
+    /// Cuenta el tiempo que pasa esperando al dispositivo cuando, por ritmo, ya le tocaba otra
+    /// imagen (mientras espera no se captura, así que no se sabe si la pantalla ha cambiado).
+    fn track_pause(&mut self) {
+        let waiting = self.need > 0 && self.last_feed.elapsed() >= self.interval && self.flow.behind();
+        match (waiting, self.paused_since) {
+            (true, None) => self.paused_since = Some(Instant::now()),
+            (false, Some(t)) => {
+                self.flow.paused_ms.fetch_add(t.elapsed().as_millis() as u32, Ordering::Relaxed);
+                self.paused_since = None;
+            }
+            _ => {}
+        }
     }
 
     fn poll(&mut self) -> Result<()> {
@@ -285,8 +385,15 @@ impl Sink {
 }
 
 fn run(monitor: usize, cmd: &mpsc::Receiver<Command>, stop: &AtomicBool) {
+    // Los codificadores se sueltan antes de cerrar Media Foundation y COM en este hilo: soltar
+    // un objeto de Media Foundation después de MFShutdown/CoUninitialize no es válido.
+    let mf = MfGuard::new();
     let mut sinks: Vec<Sink> = Vec::new();
-    if let Err(e) = capture_loop(monitor, cmd, stop, &mut sinks) {
+    let result = match &mf {
+        Ok(_) => capture_loop(monitor, cmd, stop, &mut sinks),
+        Err(e) => Err(anyhow::anyhow!("Media Foundation: {e:#}")),
+    };
+    if let Err(e) = result {
         log::debug!("captura del monitor {monitor}: {e:#}");
         for s in &sinks {
             let _ = s.events.send(Event::Error(format!("{e:#}")));
@@ -302,6 +409,8 @@ fn run(monitor: usize, cmd: &mpsc::Receiver<Command>, stop: &AtomicBool) {
             }
         }
     }
+    drop(sinks);
+    drop(mf);
 }
 
 fn capture_loop(monitor: usize, cmd: &mpsc::Receiver<Command>, stop: &AtomicBool, sinks: &mut Vec<Sink>) -> Result<()> {
@@ -309,7 +418,6 @@ fn capture_loop(monitor: usize, cmd: &mpsc::Receiver<Command>, stop: &AtomicBool
     // trabajo normal y no lo manda a los núcleos de bajo consumo.
     let mut task = 0u32;
     let _mmcss = unsafe { AvSetMmThreadCharacteristicsW(w!("Capture"), &mut task) };
-    let _mf = MfGuard::new()?;
     let gpu = Gpu::open(monitor)?;
     // Si una captura anterior de este monitor aún se está cerrando, Windows rechaza la nueva
     // durante un momento: se reintenta un par de segundos.
@@ -344,7 +452,7 @@ fn capture_loop(monitor: usize, cmd: &mpsc::Receiver<Command>, stop: &AtomicBool
         // Órdenes del servidor: dispositivos que llegan o se van, keyframes, calidad.
         while let Ok(c) = cmd.try_recv() {
             match c {
-                Command::Add { id, settings, events } => match Sink::new(&gpu, id, settings, events.clone()) {
+                Command::Add { id, settings, events, flow } => match Sink::new(&gpu, id, settings, events.clone(), flow) {
                     Ok(s) => {
                         let _ = events.send(Event::Started { encoder: s.enc.name.clone(), src_w: desk_w, src_h: desk_h });
                         if let Some(sh) = &shape {
@@ -385,6 +493,9 @@ fn capture_loop(monitor: usize, cmd: &mpsc::Receiver<Command>, stop: &AtomicBool
             std::thread::sleep(Duration::from_millis(5));
             continue;
         }
+        for s in sinks.iter_mut() {
+            s.track_pause();
+        }
         // Los que aún no tienen la última imagen la reciben de la copia compartida.
         if let Some(src) = &source {
             for s in sinks.iter_mut().filter(|s| s.stale && s.ready()) {
@@ -403,10 +514,7 @@ fn capture_loop(monitor: usize, cmd: &mpsc::Receiver<Command>, stop: &AtomicBool
             Acquire::Lost => {
                 log::debug!("captura {monitor}: acceso perdido, se vuelve a crear la duplicación");
                 drop(dup);
-                dup = reopen(&gpu, stop)?;
-                if (dup.width, dup.height) != (src_w, src_h) {
-                    bail!("ha cambiado la resolución del monitor; vuelve a conectar");
-                }
+                dup = reopen_same_size(&gpu, stop, (src_w, src_h))?;
                 dup_started = Instant::now();
                 fresh = true;
                 for s in sinks.iter_mut() {

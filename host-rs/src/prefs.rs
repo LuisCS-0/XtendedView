@@ -12,6 +12,18 @@ use std::path::{Path, PathBuf};
 /// Formas de conectar un dispositivo.
 pub const CONNECTIONS: [&str; 3] = ["local", "own", "cable"];
 
+/// Un dispositivo bloqueado: con qué nombre y desde dónde pidió conectarse, y cuándo.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Blocked {
+    pub name: String,
+    pub ip: String,
+    pub since: String,
+}
+
+/// Temas del panel.
+pub const THEMES: [&str; 3] = ["system", "light", "dark"];
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DevicePrefs {
@@ -19,8 +31,11 @@ pub struct DevicePrefs {
     pub name: String,
     /// "extend": pantalla adicional. "mirror": espejo de un monitor.
     pub mode: String,
-    /// Lado del ordenador en el que está el dispositivo: "left", "right", "top", "bottom".
+    /// Lado del ordenador en el que se coloca la primera vez: "left", "right", "top", "bottom".
     pub side: String,
+    /// Posición elegida arrastrando su pantalla en el panel (esquina superior izquierda, en
+    /// píxeles del escritorio de Windows). Sin ella, se coloca en `side`.
+    pub position: Option<[i32; 2]>,
     /// Monitor que se duplica en modo espejo.
     pub monitor: usize,
     /// Fotogramas por segundo; 0 = los de la pantalla del dispositivo.
@@ -29,6 +44,9 @@ pub struct DevicePrefs {
     pub bitrate: u32,
     /// Resolución respecto a la pantalla del dispositivo (1, 0.75, 0.5).
     pub scale: f64,
+    /// Escala de Windows de su pantalla adicional, en % (iconos, textos y barras más grandes sin
+    /// bajar la resolución). 0 = la que recomiende Windows.
+    pub dpi: u32,
     /// Pantalla completa en el dispositivo.
     pub fullscreen: bool,
     /// Estadísticas encima de la imagen, en el dispositivo.
@@ -41,10 +59,12 @@ impl Default for DevicePrefs {
             name: String::new(),
             mode: "extend".into(),
             side: "right".into(),
+            position: None,
             monitor: 0,
             fps: 0,
             bitrate: 20,
             scale: 1.0,
+            dpi: 0,
             fullscreen: true,
             stats: false,
         }
@@ -64,9 +84,15 @@ impl DevicePrefs {
         if ![0, 30, 60, 90, 120].contains(&self.fps) {
             self.fps = 0;
         }
+        if self.position.is_some_and(|p| p.iter().any(|v| v.abs() > 32_000)) {
+            self.position = None;
+        }
         self.bitrate = self.bitrate.clamp(2, 80);
         if ![1.0, 0.75, 0.5].contains(&self.scale) {
             self.scale = 1.0;
+        }
+        if ![0, 100, 125, 150, 175, 200, 225, 250, 300].contains(&self.dpi) {
+            self.dpi = 0;
         }
         self.name = self.name.chars().take(80).collect();
         self
@@ -78,9 +104,20 @@ impl DevicePrefs {
         match key {
             "mode" => self.mode = v.as_str().unwrap_or("").into(),
             "side" => self.side = v.as_str().unwrap_or("").into(),
+            // [x, y], o null para volver a colocarlo solo.
+            "position" => {
+                self.position = match v.as_array().map(|a| a.iter().map(|n| n.as_i64()).collect::<Vec<_>>()) {
+                    Some(xy) if xy.len() == 2 && xy.iter().all(Option::is_some) => {
+                        Some([xy[0].unwrap_or(0) as i32, xy[1].unwrap_or(0) as i32])
+                    }
+                    _ if v.is_null() => None,
+                    _ => return false,
+                }
+            }
             "fps" => self.fps = v.as_u64().unwrap_or(99) as u32,
             "bitrate" => self.bitrate = v.as_u64().unwrap_or(0) as u32,
             "scale" => self.scale = v.as_f64().unwrap_or(0.0),
+            "dpi" => self.dpi = v.as_u64().unwrap_or(1) as u32,
             "fullscreen" => self.fullscreen = v.as_bool().unwrap_or(self.fullscreen),
             "stats" => self.stats = v.as_bool().unwrap_or(self.stats),
             "monitor" => self.monitor = v.as_u64().unwrap_or(0) as usize,
@@ -102,6 +139,17 @@ pub struct Prefs {
     pub connections: Vec<String>,
     /// Medir la latencia total con la sonda (en todos los dispositivos).
     pub measure: bool,
+    /// «Imagen más suave» para los dispositivos conectados por Wi-Fi (la red del ordenador o la
+    /// red propia): el visor retiene unos milisegundos de imágenes para tapar los parones cortos.
+    /// Uno de los niveles de `SMOOTHING`.
+    pub smoothing: String,
+    /// Tema del panel: "system" (el de Windows), "light" u "dark".
+    pub theme: String,
+    /// Al cerrar el panel, apagar (quitar monitores virtuales, cerrar la red propia) y salir del
+    /// todo. Si no, sigue junto al reloj.
+    pub quit_on_close: bool,
+    /// Dispositivos bloqueados desde el panel, por su identificador: no pueden ni pedir conexión.
+    pub blocked: BTreeMap<String, Blocked>,
     /// Ajustes de cada dispositivo, por su identificador.
     pub devices: BTreeMap<String, DevicePrefs>,
     /// Versiones anteriores: una sola conexión. Se pasa a `connections` al cargar.
@@ -111,11 +159,30 @@ pub struct Prefs {
 
 impl Default for Prefs {
     fn default() -> Self {
-        Self { connections: vec!["local".into()], measure: false, devices: BTreeMap::new(), network: None }
+        Self {
+            connections: vec!["local".into()],
+            measure: false,
+            smoothing: "off".into(),
+            theme: "system".into(),
+            quit_on_close: true,
+            blocked: BTreeMap::new(),
+            devices: BTreeMap::new(),
+            network: None,
+        }
     }
 }
 
+/// Niveles de «Imagen más suave» y cuántos milisegundos de imágenes retiene el visor en cada uno:
+/// cuanto más, más largos los parones de la Wi-Fi que tapa, y más retraso.
+/// Más de 100 ms ya se nota demasiado al usar el ratón.
+pub const SMOOTHING: [(&str, u32); 4] = [("off", 0), ("low", 25), ("medium", 50), ("high", 100)];
+
 impl Prefs {
+    /// Milisegundos que retiene el visor con el nivel elegido (0 si está desactivado).
+    pub fn smoothing_ms(&self) -> u32 {
+        SMOOTHING.iter().find(|(name, _)| *name == self.smoothing).map_or(0, |(_, ms)| *ms)
+    }
+
     pub fn load(path: &Path) -> Self {
         let text = std::fs::read_to_string(path).unwrap_or_default();
         let mut p = serde_json::from_str::<Prefs>(&text).unwrap_or_default();
@@ -258,5 +325,23 @@ mod tests {
         assert!(p.set_connection("own", true));
         assert!(p.set_connection("local", false));
         assert_eq!(p.connections, vec!["own".to_string()]);
+        // Posición arrastrada en el panel, y vuelta a la automática.
+        assert!(p.set_device("a", "position", &serde_json::json!([2880, -120])));
+        assert_eq!(p.device("a").position, Some([2880, -120]));
+        assert!(!p.set_device("a", "position", &serde_json::json!(["x", 1])));
+        assert!(!p.set_device("a", "position", &serde_json::json!([99999, 0])));
+        assert!(p.set_device("a", "position", &serde_json::Value::Null));
+        assert_eq!(p.device("a").position, None);
+    }
+
+    #[test]
+    fn smoothing_levels_and_older_options() {
+        // Las versiones de prueba guardaban el suavizado como sí/no: se ignora sin perder lo demás.
+        let p: Prefs = serde_json::from_str(r#"{"measure":true,"smooth_wifi":true,"smooth_own":true,"devices":{"a":{"mode":"mirror"}}}"#).unwrap();
+        assert!(p.measure);
+        assert_eq!(p.device("a").mode, "mirror");
+        assert_eq!((p.smoothing.as_str(), p.smoothing_ms()), ("off", 0));
+        let ms = |level: &str| Prefs { smoothing: level.into(), ..Prefs::default() }.smoothing_ms();
+        assert_eq!((ms("low"), ms("medium"), ms("high"), ms("raro")), (25, 50, 100, 0));
     }
 }

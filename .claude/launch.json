@@ -64,6 +64,20 @@
       "port": 9080
     },
     {
+      "name": "xtendedview-pruebas-datos-aparte",
+      "runtimeExecutable": "host-rs/target/release/xtendedview.exe",
+      "runtimeArgs": [
+        "--no-panel",
+        "--port",
+        "9443",
+        "--http-port",
+        "9080",
+        "--data",
+        "certs/pruebas"
+      ],
+      "port": 9080
+    },
+    {
       "name": "xtendedview-red",
       "runtimeExecutable": "host-rs/target/release/xtendedview.exe",
       "runtimeArgs": [

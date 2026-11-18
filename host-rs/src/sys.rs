@@ -345,6 +345,12 @@ mod tests {
     }
 }
 
+/// Si hay abierta alguna ventana del panel (las de Edge en modo aplicación con ese título).
+pub fn panel_window_open(title: &str) -> bool {
+    let title = HSTRING::from(title);
+    unsafe { FindWindowExW(None, None, w!("Chrome_WidgetWin_1"), &title) }.is_ok()
+}
+
 /// Hace parpadear en la barra de tareas la ventana del panel (hasta que se ponga delante), para
 /// avisar de que un dispositivo espera a que lo acepten.
 pub fn flash_panel_window(title: &str) {

@@ -4,6 +4,10 @@
 //! Desktop Duplication → procesador de vídeo D3D11 (BGRA→NV12) → QuickSync (Media Foundation)
 //! → WebSocket sobre HTTPS → navegador (WebCodecs). La imagen no sale de la GPU hasta que el
 //! codificador entrega el H.264. Los ajustes se eligen en un panel en el propio ordenador.
+//!
+//! Con la característica `gui` (la versión del instalador) no hay ventana de consola: el
+//! programa vive en el área de notificación y escribe su registro en un archivo.
+#![cfg_attr(feature = "gui", windows_subsystem = "windows")]
 mod capture;
 mod certs;
 mod clock;
@@ -17,20 +21,27 @@ mod pipeline;
 mod prefs;
 mod server;
 mod sys;
+mod tray;
 mod vdd;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use windows::core::HSTRING;
+use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
 use windows::Win32::Media::timeBeginPeriod;
 use windows::Win32::System::Console::SetConsoleTitleW;
 use windows::Win32::System::Threading::{
-    GetCurrentProcess, ProcessPowerThrottling, SetProcessInformation, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
-    PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
-    PROCESS_POWER_THROTTLING_STATE,
+    CreateMutexW, GetCurrentProcess, ProcessPowerThrottling, SetProcessInformation,
+    PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+    PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION, PROCESS_POWER_THROTTLING_STATE,
 };
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
+use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+
+/// Versión del instalador: sin consola, con icono junto al reloj y registro en un archivo.
+const GUI: bool = cfg!(feature = "gui");
 
 /// Ajustes de proceso para baja latencia.
 ///
@@ -69,9 +80,13 @@ pub struct Args {
     /// Retraso acumulado a partir del cual se descartan frames y se pide un keyframe.
     #[arg(long, default_value_t = 200.0)]
     pub max_inflight_ms: f64,
-    /// Carpeta del proyecto (la que contiene web/ y certs/). Por defecto se busca sola.
+    /// Carpeta del programa (la que contiene web/). Por defecto se busca sola.
     #[arg(long)]
     pub root: Option<PathBuf>,
+    /// Carpeta de datos (certificados, código, ajustes). Por defecto, certs/ del proyecto si se
+    /// ejecuta desde el código fuente y, si está instalado, %LOCALAPPDATA%\XtendedView.
+    #[arg(long)]
+    pub data: Option<PathBuf>,
     #[arg(short, long)]
     pub verbose: bool,
     /// Muestra los monitores que ve DXGI (y su adaptador) y sale.
@@ -88,17 +103,60 @@ pub struct Args {
     pub start: bool,
 }
 
-fn init_logger(verbose: bool) {
-    env_logger::Builder::new()
-        .filter_level(if verbose { log::LevelFilter::Debug } else { log::LevelFilter::Info })
+/// Registro en la consola o, sin ella, en `file` (se empieza de cero en cada arranque).
+fn init_logger(verbose: bool, file: Option<&Path>) {
+    let mut b = env_logger::Builder::new();
+    b.filter_level(if verbose { log::LevelFilter::Debug } else { log::LevelFilter::Info })
         .filter_module("rustls", log::LevelFilter::Warn)
         .filter_module("tungstenite", log::LevelFilter::Warn)
         .filter_module("tokio_tungstenite", log::LevelFilter::Warn)
         .format(|buf, rec| {
             let t = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
             writeln!(buf, "{:02}:{:02}:{:02} {}", t.hour(), t.minute(), t.second(), rec.args())
-        })
-        .init();
+        });
+    if let Some(f) = file.and_then(|p| std::fs::File::create(p).ok()) {
+        b.target(env_logger::Target::Pipe(Box::new(f)));
+    }
+    b.init();
+}
+
+/// Dónde se guardan certificados, código y ajustes. Versión portátil (con portable.txt junto al
+/// ejecutable): en datos\ a su lado, para llevarla en un USB. Desde el código fuente, en certs/
+/// (como siempre). Instalado, la carpeta del programa no se puede escribir: en la del usuario.
+fn data_dir(root: &Path, explicit: Option<PathBuf>) -> Result<PathBuf> {
+    let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf));
+    let portable = exe_dir.filter(|d| d.join("portable.txt").is_file());
+    let dir = match explicit {
+        Some(d) => d,
+        None if portable.is_some() => portable.unwrap_or_default().join("datos"),
+        None if root.join("host-rs").is_dir() || root.join("certs").is_dir() => root.join("certs"),
+        None => PathBuf::from(std::env::var_os("LOCALAPPDATA").context("falta LOCALAPPDATA")?).join("XtendedView"),
+    };
+    std::fs::create_dir_all(&dir).with_context(|| format!("no se pudo crear {}", dir.display()))?;
+    Ok(dir)
+}
+
+/// Solo una copia por puerto. Si ya hay una abierta, se le abre el panel y esta termina.
+fn already_running(http_port: u16) -> bool {
+    let name = HSTRING::from(format!("Local\\XtendedView-{http_port}"));
+    unsafe {
+        // El mutex se queda abierto mientras viva el proceso (no se cierra a propósito).
+        let created = CreateMutexW(None, true, &name);
+        created.is_ok() && GetLastError() == ERROR_ALREADY_EXISTS
+    }
+}
+
+/// Sin consola, los errores al arrancar se avisan con una ventana.
+fn report_fatal(e: &anyhow::Error) {
+    log::error!("{e:#}");
+    if GUI {
+        let text = HSTRING::from(format!("XtendedView no ha podido arrancar:\n\n{e:#}"));
+        unsafe {
+            MessageBoxW(None, &text, &HSTRING::from("XtendedView"), MB_OK | MB_ICONERROR);
+        }
+    } else {
+        eprintln!("Error: {e:#}");
+    }
 }
 
 /// Carpeta del proyecto: la primera, subiendo desde el directorio actual o desde el
@@ -147,10 +205,25 @@ async fn announce_new_addresses(port: u16) {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
+    if let Err(e) = run().await {
+        report_fatal(&e);
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<()> {
     clock::init();
     let args = Args::parse();
-    init_logger(args.verbose);
+    // Antes que nada (ni siquiera el registro, que es el mismo archivo): si ya está abierto, se
+    // muestra su panel y esta copia termina.
+    if !args.list && already_running(args.http_port) {
+        sys::open_app_window(&format!("http://localhost:{}/panel", args.http_port));
+        return Ok(());
+    }
+    let root = find_root(args.root.clone());
+    let data = root.as_ref().map_err(|e| anyhow::anyhow!("{e:#}")).and_then(|r| data_dir(r, args.data.clone()));
+    init_logger(args.verbose, if GUI { data.as_ref().ok().map(|d| d.join("xtendedview.log")) } else { None }.as_deref());
     unsafe {
         // Píxeles físicos en toda la API de Windows (captura, coordenadas del táctil…).
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -180,8 +253,9 @@ async fn main() -> Result<()> {
         }
         return Ok(());
     }
-    let root = find_root(args.root.clone())?;
-    let data = root.join("certs");
+    let root = root?;
+    let data = data?;
+    log::info!("Datos en {}", data.display());
     let certs = certs::CertManager::new(&data)?;
     certs.ensure()?;
     let key = prefs::pairing_key(&data, false)?;
@@ -215,8 +289,25 @@ async fn main() -> Result<()> {
     tokio::spawn(announce_new_addresses(args.port));
     if !args.no_panel {
         sys::open_app_window(&app.panel_url());
-        sys::keep_panel_icon("XtendedView"); // el título de panel.html
     }
+    sys::keep_panel_icon("XtendedView"); // el título de panel.html
+
+    // Icono junto al reloj: abrir el panel o salir (apagando antes: quita los monitores
+    // virtuales y cierra la red propia).
+    let (tray_tx, mut tray_rx) = tokio::sync::mpsc::unbounded_channel();
+    tray::spawn(tray_tx);
+    let tray_app = app.clone();
+    tokio::spawn(async move {
+        while let Some(ev) = tray_rx.recv().await {
+            match ev {
+                tray::TrayEvent::OpenPanel => sys::open_app_window(&tray_app.panel_url()),
+                tray::TrayEvent::Quit => {
+                    log::info!("Saliendo");
+                    tray_app.quit().await;
+                }
+            }
+        }
+    });
     tokio::join!(server::serve(app.clone(), https), server::serve(app, http));
     Ok(())
 }

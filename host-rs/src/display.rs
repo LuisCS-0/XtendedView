@@ -7,7 +7,13 @@ use std::collections::HashSet;
 use std::mem::size_of;
 use std::time::{Duration, Instant};
 use windows::core::PCWSTR;
-use windows::Win32::Devices::Display::{SetDisplayConfig, SDC_APPLY, SDC_TOPOLOGY_EXTEND};
+use windows::Win32::Devices::Display::{
+    DisplayConfigGetDeviceInfo, DisplayConfigSetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig,
+    SetDisplayConfig, DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
+    DISPLAYCONFIG_DEVICE_INFO_TYPE, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
+    QDC_ONLY_ACTIVE_PATHS, SDC_APPLY, SDC_TOPOLOGY_EXTEND,
+};
+use windows::Win32::Foundation::LUID;
 use windows::Win32::Foundation::POINTL;
 use windows::Win32::Graphics::Gdi::{
     ChangeDisplaySettingsExW, EnumDisplaySettingsExW, EnumDisplaySettingsW, CDS_UPDATEREGISTRY, DEVMODEW,
@@ -178,6 +184,115 @@ pub fn best_mode(available: &[Mode], w: u32, h: u32, hz: u32) -> Option<(Mode, b
             (fits, -err, m.width as u64 * m.height as u64, hz_gap(m))
         })
         .map(|m| (*m, false))
+}
+
+// ------------------------------------------------------------------ escala (125 %, 150 %…)
+//
+// La «Escala» de la configuración de pantalla de Windows, por monitor: agranda iconos, textos y
+// barras sin bajar la resolución. Windows no la documenta: la guarda como pasos relativos a la
+// escala recomendada para ese monitor y se lee y cambia con DisplayConfigGet/SetDeviceInfo y los
+// tipos -3 y -4 (lo mismo que hace su configuración de pantalla).
+
+/// Escalas que ofrece Windows, en orden. El paso relativo 0 es la recomendada.
+const DPI_STEPS: [u32; 12] = [100, 125, 150, 175, 200, 225, 250, 300, 350, 400, 450, 500];
+
+#[repr(C)]
+struct DpiScaleGet {
+    header: DISPLAYCONFIG_DEVICE_INFO_HEADER,
+    min: i32,
+    cur: i32,
+    max: i32,
+}
+
+#[repr(C)]
+struct DpiScaleSet {
+    header: DISPLAYCONFIG_DEVICE_INFO_HEADER,
+    scale: i32,
+}
+
+/// Adaptador e identificador de origen de un monitor (\\.\DISPLAYn) en la API de DisplayConfig.
+fn display_source(device: &str) -> Option<(LUID, u32)> {
+    unsafe {
+        let (mut np, mut nm) = (0u32, 0u32);
+        GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut np, &mut nm).ok().ok()?;
+        let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); np as usize];
+        let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); nm as usize];
+        QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &mut np, paths.as_mut_ptr(), &mut nm, modes.as_mut_ptr(), None)
+            .ok()
+            .ok()?;
+        for p in &paths[..np as usize] {
+            let mut name = DISPLAYCONFIG_SOURCE_DEVICE_NAME::default();
+            name.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+            name.header.size = size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32;
+            name.header.adapterId = p.sourceInfo.adapterId;
+            name.header.id = p.sourceInfo.id;
+            if DisplayConfigGetDeviceInfo(&mut name.header) != 0 {
+                continue;
+            }
+            let len = name.viewGdiDeviceName.iter().position(|&c| c == 0).unwrap_or(name.viewGdiDeviceName.len());
+            if String::from_utf16_lossy(&name.viewGdiDeviceName[..len]) == device {
+                return Some((p.sourceInfo.adapterId, p.sourceInfo.id));
+            }
+        }
+        None
+    }
+}
+
+/// (índice de la escala recomendada en DPI_STEPS, paso actual, mínimo, máximo).
+fn dpi_steps(adapter: LUID, id: u32) -> Option<(i32, i32, i32, i32)> {
+    let mut get = DpiScaleGet {
+        header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+            r#type: DISPLAYCONFIG_DEVICE_INFO_TYPE(-3),
+            size: size_of::<DpiScaleGet>() as u32,
+            adapterId: adapter,
+            id,
+        },
+        min: 0,
+        cur: 0,
+        max: 0,
+    };
+    if unsafe { DisplayConfigGetDeviceInfo(&mut get.header) } != 0 {
+        return None;
+    }
+    // El mínimo siempre es 100 %: la recomendada está tantos pasos por encima.
+    Some((-get.min, get.cur, get.min, get.max))
+}
+
+/// Escala actual del monitor, en %.
+pub fn scale(device: &str) -> Option<u32> {
+    let (adapter, id) = display_source(device)?;
+    let (rec, cur, _, _) = dpi_steps(adapter, id)?;
+    DPI_STEPS.get((rec + cur).max(0) as usize).copied()
+}
+
+/// Pone la escala del monitor (en %; 0 = la recomendada por Windows). Si no la admite, la más
+/// cercana que admita.
+pub fn set_scale(device: &str, percent: u32) -> Result<()> {
+    let Some((adapter, id)) = display_source(device) else { bail!("no encuentro el monitor {device}") };
+    let Some((rec, cur, min, max)) = dpi_steps(adapter, id) else { bail!("Windows no da la escala de {device}") };
+    let target = if percent == 0 {
+        0
+    } else {
+        let idx = DPI_STEPS.iter().position(|&s| s >= percent).unwrap_or(DPI_STEPS.len() - 1) as i32;
+        (idx - rec).clamp(min, max)
+    };
+    if target == cur {
+        return Ok(());
+    }
+    let set = DpiScaleSet {
+        header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+            r#type: DISPLAYCONFIG_DEVICE_INFO_TYPE(-4),
+            size: size_of::<DpiScaleSet>() as u32,
+            adapterId: adapter,
+            id,
+        },
+        scale: target,
+    };
+    let r = unsafe { DisplayConfigSetDeviceInfo(&set.header) };
+    if r != 0 {
+        bail!("Windows no aceptó la escala ({r})");
+    }
+    Ok(())
 }
 
 /// Conecta un monitor virtual y espera a que Windows lo añada al escritorio.
