@@ -1,6 +1,7 @@
-# Claves privadas, código de emparejamiento y contraseña del hotspot
+# Claves privadas, código de emparejamiento, contraseña de la red propia y ajustes
 certs/
-__pycache__/
 host-rs/target/
 # Instaladores generados por tools/instalador.ps1
 dist/
+# Configuración local de Claude Code (pruebas de desarrollo)
+.claude/

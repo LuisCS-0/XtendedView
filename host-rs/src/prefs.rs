@@ -72,7 +72,7 @@ impl Default for DevicePrefs {
 }
 
 impl DevicePrefs {
-    /// Corrige valores fuera de rango (fichero editado a mano, versiones antiguas…).
+    /// Corrige valores fuera de rango (por ejemplo, si se editó el fichero a mano).
     pub fn sanitized(mut self) -> Self {
         let d = DevicePrefs::default();
         if !["extend", "mirror"].contains(&self.mode.as_str()) {
@@ -152,9 +152,6 @@ pub struct Prefs {
     pub blocked: BTreeMap<String, Blocked>,
     /// Ajustes de cada dispositivo, por su identificador.
     pub devices: BTreeMap<String, DevicePrefs>,
-    /// Versiones anteriores: una sola conexión. Se pasa a `connections` al cargar.
-    #[serde(skip_serializing)]
-    network: Option<String>,
 }
 
 impl Default for Prefs {
@@ -167,7 +164,6 @@ impl Default for Prefs {
             quit_on_close: true,
             blocked: BTreeMap::new(),
             devices: BTreeMap::new(),
-            network: None,
         }
     }
 }
@@ -185,20 +181,7 @@ impl Prefs {
 
     pub fn load(path: &Path) -> Self {
         let text = std::fs::read_to_string(path).unwrap_or_default();
-        let mut p = serde_json::from_str::<Prefs>(&text).unwrap_or_default();
-        if let Some(old) = p.network.take() {
-            if p.connections == Prefs::default().connections {
-                p.connections = vec![old];
-            }
-        }
-        // Versiones anteriores guardaban los ajustes de la pantalla sueltos: valen como los de
-        // un dispositivo nuevo.
-        if p.devices.is_empty() && text.contains("\"mode\"") {
-            if let Ok(old) = serde_json::from_str::<DevicePrefs>(&text) {
-                p.devices.insert(String::new(), old);
-            }
-        }
-        p.sanitized()
+        serde_json::from_str::<Prefs>(&text).unwrap_or_default().sanitized()
     }
 
     pub fn save(&self, path: &Path) {
@@ -232,8 +215,8 @@ impl Prefs {
         true
     }
 
-    /// Ajustes de un dispositivo: los suyos o, si es nuevo, los de partida (los de la versión
-    /// anterior, si los había, guardados con clave vacía).
+    /// Ajustes de un dispositivo: los suyos o, si es nuevo, los de partida (los guardados con
+    /// clave vacía, si los hay; si no, los de serie).
     pub fn device(&self, id: &str) -> DevicePrefs {
         self.devices
             .get(id)
@@ -299,21 +282,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn migrates_old_single_device_settings() {
-        let dir = std::env::temp_dir().join(format!("xv-prefs-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("ajustes.json");
-        std::fs::write(&file, r#"{"network":"cable","wireless":"local","mode":"mirror","side":"left","fps":60,"bitrate":35,"scale":1.0,"fullscreen":true,"stats":false,"measure":true,"monitor":0}"#).unwrap();
-        let p = Prefs::load(&file);
-        assert_eq!(p.connections, vec!["cable".to_string()]);
-        assert!(p.measure);
-        // Un dispositivo nuevo hereda lo que había.
-        let d = p.device("nuevo");
-        assert_eq!((d.mode.as_str(), d.side.as_str(), d.fps, d.bitrate), ("mirror", "left", 60, 35));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn devices_keep_their_own_settings() {
         let mut p = Prefs::default();
         assert!(p.set_device("a", "mode", &serde_json::json!("mirror")));
@@ -335,9 +303,9 @@ mod tests {
     }
 
     #[test]
-    fn smoothing_levels_and_older_options() {
-        // Las versiones de prueba guardaban el suavizado como sí/no: se ignora sin perder lo demás.
-        let p: Prefs = serde_json::from_str(r#"{"measure":true,"smooth_wifi":true,"smooth_own":true,"devices":{"a":{"mode":"mirror"}}}"#).unwrap();
+    fn smoothing_levels_and_unknown_options() {
+        // Un ajuste que no conoce (de otra versión, o escrito a mano) se ignora sin perder lo demás.
+        let p: Prefs = serde_json::from_str(r#"{"measure":true,"smooth_wifi":true,"devices":{"a":{"mode":"mirror"}}}"#).unwrap();
         assert!(p.measure);
         assert_eq!(p.device("a").mode, "mirror");
         assert_eq!((p.smoothing.as_str(), p.smoothing_ms()), ("off", 0));

@@ -100,21 +100,6 @@ html, body {
   z-index: 6;
 }
 
-.menu-btn {
-  position: fixed;
-  top: calc(env(safe-area-inset-top) + 8px);
-  right: calc(env(safe-area-inset-right) + 8px);
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  background: rgba(0, 0, 0, 0.45);
-  color: #fff;
-  font-size: 20px;
-  line-height: 1;
-  z-index: 3;
-}
-
 .overlay {
   position: fixed;
   inset: 0;
@@ -152,7 +137,7 @@ h1 { margin: 0; font-size: 21px; }
 .warn a { color: var(--accent-text); }
 
 label { display: block; margin-bottom: 12px; color: var(--muted); font-size: 13px; }
-input, select {
+input {
   display: block;
   width: 100%;
   margin-top: 4px;
@@ -163,18 +148,11 @@ input, select {
   color: var(--text);
   font-size: 16px; /* evita el zoom automático en iOS */
 }
-input:focus, select:focus { outline: 2px solid var(--sky); outline-offset: 1px; }
+input:focus { outline: 2px solid var(--sky); outline-offset: 1px; }
 #key { letter-spacing: 0.12em; text-transform: uppercase; font-family: ui-monospace, Consolas, monospace; }
-
-.row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
-@media (max-width: 380px) { .row { grid-template-columns: 1fr; } }
-
-label.check { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--text); font-size: 14px; }
-label.check input { width: 18px; height: 18px; margin: 0; }
-.hint { flex-basis: 100%; padding-left: 26px; color: var(--muted); font-size: 12px; }
 code { font-family: ui-monospace, Consolas, monospace; }
 
-button.primary, button.secondary {
+button.primary {
   display: block;
   width: 100%;
   margin-top: 6px;
@@ -182,6 +160,8 @@ button.primary, button.secondary {
   border-radius: 12px;
   font-size: 16px;
   font-weight: 600;
+  border: 0;
+  background: var(--grad);
+  color: #fff;
+  box-shadow: 0 8px 20px rgba(139, 28, 250, 0.35);
 }
-button.primary { border: 0; background: var(--grad); color: #fff; box-shadow: 0 8px 20px rgba(139, 28, 250, 0.35); }
-button.secondary { border: 1px solid var(--border); background: transparent; color: var(--text); }

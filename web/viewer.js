@@ -228,8 +228,6 @@ function sendHello() {
   const hello = {
     t: 'hello', key: savedKey(), id: deviceId(), w, h, hz: displayHz,
     dpr: window.devicePixelRatio || 1, name: st.name,
-    // Para el host en Python, que no tiene panel: valores por defecto.
-    fps: displayHz, bitrate: 20,
   };
   const sig = JSON.stringify(hello);
   if (sig === st.lastHello) return;
@@ -301,10 +299,8 @@ function showToast(text) {
 async function configure(msg) {
   st.configuring = true;
   st.queue = [];
-  // Con "description" (host en Python) los frames vienen en formato AVCC; sin ella (host en
-  // Rust) vienen en Annex B, con SPS/PPS dentro de cada keyframe.
+  // Los frames vienen en Annex B, con SPS/PPS dentro de cada keyframe (sin "description").
   const base = { codec: msg.codec, codedWidth: msg.width, codedHeight: msg.height, optimizeForLatency: true };
-  if (msg.description) base.description = b64ToBytes(msg.description);
   let chosen = null;
   for (const hardwareAcceleration of ['prefer-hardware', 'no-preference']) {
     try {
@@ -669,19 +665,14 @@ function renderHud() {
   const s = st.stream;
   const h = m.host;
   const hw = st.decoderConfig?.hardwareAcceleration === 'prefer-hardware' ? 'HW' : 'auto';
-  const host = s.encoder === 'mf' ? 'Rust/GPU' : `Python/${s.encoder}`;
   const mode = s.mode === 'extend' ? 'extendida' : 'espejo';
   const lines = [
-    `${s.width}×${s.height} · ${s.fps} fps · ${mode} · ${s.codec} · ${hw} · ${host}${smoothOn() ? ` · suave (${fmt(smoothDelay(), 0)} ms desde la captura)` : ''}`,
+    `${s.width}×${s.height} · ${s.fps} fps · ${mode} · ${s.codec} · ${hw}${smoothOn() ? ` · suave (${fmt(smoothDelay(), 0)} ms desde la captura)` : ''}`,
     `Recibido   ${fmt(m.fps, 0)} fps · ${fmt(m.mbps)} Mbps`,
     `Red        ${fmt(m.net.avg)} ms (p95 ${fmt(m.net.pct(0.95))}) · RTT ${fmt(sync.rtt)}`,
     `Decodif.   ${fmt(m.dec.avg)} ms (p95 ${fmt(m.dec.pct(0.95))})`,
   ];
-  if (h) {
-    lines.push(h.encMs50 !== undefined
-      ? `Ordenador  ${h.encFps} fps · ${h.dropped} descartados · captura→cod. ${fmt(h.encMs50)} ms (p95 ${fmt(h.encMs95)})`
-      : `Ordenador  ${h.encFps} fps · ${h.dropped} descartados · var. cod. ${fmt(h.encJitter50)}/${fmt(h.encJitter95)} ms`);
-  }
+  if (h) lines.push(`Ordenador  ${h.encFps} fps · ${h.dropped} descartados · captura→cod. ${fmt(h.encMs50)} ms (p95 ${fmt(h.encMs95)})`);
   if (st.settings.measure) {
     lines.push(m.e2e.count
       ? `TOTAL      ${fmt(m.e2e.avg, 0)} ms (mín ${fmt(m.e2e.min, 0)} · p95 ${fmt(m.e2e.pct(0.95), 0)})`

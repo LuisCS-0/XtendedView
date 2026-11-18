@@ -1655,7 +1655,7 @@ async fn forward(
                     }
                     Event::Config { codec } => send_json(json!({
                         "t": "config", "codec": codec, "width": s.width, "height": s.height,
-                        "fps": s.fps, "bitrate": s.bitrate / 1_000_000, "encoder": "mf", "pipeline": "gpu",
+                        "fps": s.fps, "bitrate": s.bitrate / 1_000_000,
                         "srcWidth": src.0, "srcHeight": src.1, "mode": if extend { "extend" } else { "mirror" },
                     })),
                     Event::Frame { data, key, host_ms, encode_ms: e } => {

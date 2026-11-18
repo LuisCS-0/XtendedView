@@ -8,9 +8,7 @@
 //! `localhost`: aunque alguien robara su clave de `certs/`, los dispositivos que confían en
 //! ella no aceptarían un certificado suyo para ninguna web de internet. Tampoco puede crear
 //! otras CA (longitud de cadena 0) ni lleva el nombre del equipo, que vería cualquiera que se
-//! conecte. Las CA antiguas sin estas restricciones se rehacen solas al arrancar.
-//!
-//! Los ficheros son los mismos que usa la versión de Python (carpeta `certs/`).
+//! conecte. Una CA guardada sin estas restricciones no se usa: se rehace al arrancar.
 use anyhow::{Context, Result};
 use rcgen::{
     BasicConstraints, CertificateParams, CidrSubnet, DnType, ExtendedKeyUsagePurpose, GeneralSubtree, IsCa,
@@ -122,13 +120,12 @@ impl CertManager {
         s
     }
 
-    /// La CA guardada es la actual: con las restricciones y el nombre de XtendedView (las de
-    /// versiones anteriores no tienen una cosa o la otra).
+    /// La CA guardada está limitada a direcciones privadas (si no, no se usa).
     fn ca_is_current(&self) -> bool {
         fs::read_to_string(&self.ca_crt)
             .ok()
             .and_then(|pem| CertificateParams::from_ca_cert_pem(&pem).ok())
-            .is_some_and(|p| p.name_constraints.is_some() && format!("{:?}", p.distinguished_name).contains(CA_NAME))
+            .is_some_and(|p| p.name_constraints.is_some())
     }
 
     /// Crea lo que falte. Devuelve true si el certificado del servidor ha cambiado.
@@ -136,10 +133,7 @@ impl CertManager {
         let exists = self.ca_crt.exists() && self.ca_key.exists();
         if !exists || !self.ca_is_current() {
             if exists {
-                log::warn!(
-                    "Se rehace la CA del ordenador («{CA_NAME} …», limitada a direcciones privadas). \
-                     Hay que volver a instalarla en los dispositivos y borrar la anterior."
-                );
+                log::warn!("La CA guardada no está limitada a direcciones privadas: se crea otra (hay que instalarla en los dispositivos)");
             }
             self.create_ca()?;
             let _ = fs::remove_file(&self.crt);
@@ -192,7 +186,8 @@ impl CertManager {
             .context("no se pudo leer certs/ca.key")?;
         let mut ca_params = CertificateParams::from_ca_cert_pem(&fs::read_to_string(&self.ca_crt)?)
             .context("no se pudo leer certs/ca.crt")?;
-        // Mismo identificador de clave que pone OpenSSL, para encadenar con la CA de Python.
+        // El mismo identificador de clave con el que se creó la CA, para que el del servidor
+        // encadene con ella.
         ca_params.key_identifier_method = KeyIdMethod::PreSpecified(sha1_key_id(&ca_key));
         let ca = ca_params.self_signed(&ca_key)?;
 
@@ -246,7 +241,7 @@ mod tests {
     use super::*;
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("pantalla-certs-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("xtendedview-certs-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         dir
     }
@@ -285,13 +280,13 @@ mod tests {
     }
 
     #[test]
-    fn old_ca_is_replaced() {
-        let dir = temp_dir("antigua");
+    fn unconstrained_ca_is_replaced() {
+        let dir = temp_dir("sin-limites");
         let cm = CertManager::new(&dir).unwrap();
-        // CA como las de antes: sin restricciones y con el nombre del equipo.
+        // Una CA que podría firmar cualquier web: no se usa.
         let key = KeyPair::generate().unwrap();
         let mut p = CertificateParams::default();
-        p.distinguished_name.push(DnType::CommonName, "Pantalla PoC CA (EQUIPO)");
+        p.distinguished_name.push(DnType::CommonName, "CA sin restricciones");
         p.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         let old = p.self_signed(&key).unwrap();
         fs::write(&cm.ca_crt, old.pem()).unwrap();
