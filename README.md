@@ -391,3 +391,9 @@ web/               visor (index.html, viewer.js), panel del ordenador (panel.*),
                    configuración (setup.html) e iconos (favicon.ico, icon-*.png)
 tools/hotspot.ps1  red Wi-Fi directa del portátil (Wi-Fi Direct en modo legacy)
 ```
+
+## Licencia
+
+[MIT](LICENSE): se puede usar, copiar, modificar y distribuir libremente, también en otros
+proyectos, conservando el aviso de autoría. El driver Parsec VDD no forma parte del proyecto: cada
+usuario lo descarga de Parsec, con su propia licencia.

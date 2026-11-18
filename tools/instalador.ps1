@@ -37,6 +37,7 @@ Copy-Item "$root\host-rs\target\gui\release\xtendedview.exe" $dir
 Copy-Item "$root\web" $dir -Recurse
 Copy-Item "$root\tools\vdd-resoluciones.ps1" "$dir\tools"
 Copy-Item "$root\installer\portable.txt" $dir
+Copy-Item "$root\LICENSE" "$dir\LICENSE.txt"
 $zip = "$root\dist\XtendedView-$version-portable.zip"
 Remove-Item $zip -ErrorAction SilentlyContinue
 Compress-Archive -Path $dir -DestinationPath $zip

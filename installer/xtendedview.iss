@@ -46,6 +46,7 @@ Name: "autostart"; Description: "Abrir XtendedView al iniciar sesión (se queda 
 [Files]
 Source: "{#Root}\host-rs\target\gui\release\{#Exe}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Root}\web\*"; DestDir: "{app}\web"; Flags: ignoreversion recursesubdirs
+Source: "{#Root}\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 ; Para registrar resoluciones exactas del monitor virtual (lo lanza el panel, como administrador).
 Source: "{#Root}\tools\vdd-resoluciones.ps1"; DestDir: "{app}\tools"; Flags: ignoreversion
 

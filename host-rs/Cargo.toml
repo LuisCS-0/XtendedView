@@ -2,6 +2,8 @@
 name = "xtendedview"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+authors = ["Luis Corral Sieiro"]
 description = "XtendedView: usa un móvil, una tablet u otro dispositivo con navegador como pantalla del ordenador (captura sin copias DDA + D3D11 y H.264 por QuickSync)"
 
 [dependencies]
