@@ -10,13 +10,19 @@
     {
       "name": "pantalla-host-rs",
       "runtimeExecutable": "host-rs/target/release/pantalla-host.exe",
-      "runtimeArgs": [],
+      "runtimeArgs": ["--no-panel"],
       "port": 8080
+    },
+    {
+      "name": "pantalla-host-rs-pruebas",
+      "runtimeExecutable": "host-rs/target/release/pantalla-host.exe",
+      "runtimeArgs": ["--no-panel", "--port", "9443", "--http-port", "9080"],
+      "port": 9080
     },
     {
       "name": "pantalla-host-rs-red",
       "runtimeExecutable": "host-rs/target/release/pantalla-host.exe",
-      "runtimeArgs": ["--hotspot"],
+      "runtimeArgs": ["--hotspot", "--no-panel"],
       "port": 8080
     }
   ]

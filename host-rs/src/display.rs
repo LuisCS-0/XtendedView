@@ -1,5 +1,6 @@
 //! Monitor virtual a la medida del cliente: crearlo, elegir su modo y quitarlo.
 use crate::capture::{self, OutputInfo};
+use crate::input::Rect;
 use crate::vdd::Vdd;
 use anyhow::{bail, Result};
 use std::collections::HashSet;
@@ -7,10 +8,11 @@ use std::mem::size_of;
 use std::time::{Duration, Instant};
 use windows::core::PCWSTR;
 use windows::Win32::Devices::Display::{SetDisplayConfig, SDC_APPLY, SDC_TOPOLOGY_EXTEND};
+use windows::Win32::Foundation::POINTL;
 use windows::Win32::Graphics::Gdi::{
     ChangeDisplaySettingsExW, EnumDisplaySettingsExW, EnumDisplaySettingsW, CDS_UPDATEREGISTRY, DEVMODEW,
     DISP_CHANGE_SUCCESSFUL, DMDO_270, DMDO_90, DMDO_DEFAULT, DM_DISPLAYFREQUENCY, DM_DISPLAYORIENTATION,
-    DM_PELSHEIGHT, DM_PELSWIDTH, EDS_ROTATEDMODE, ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_MODE,
+    DM_PELSHEIGHT, DM_PELSWIDTH, DM_POSITION, EDS_ROTATEDMODE, ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_MODE,
 };
 
 /// Modo nativo del monitor (en horizontal, tal como lo ofrece el driver).
@@ -110,6 +112,41 @@ pub fn apply(device: &str, t: Target) -> Result<()> {
     Ok(())
 }
 
+/// Posición actual del monitor en el escritorio (esquina superior izquierda).
+pub fn position(device: &str) -> Option<(i32, i32)> {
+    let name = wide(device);
+    let mut dm = devmode();
+    if !unsafe { EnumDisplaySettingsW(PCWSTR(name.as_ptr()), ENUM_CURRENT_SETTINGS, &mut dm) }.as_bool() {
+        return None;
+    }
+    let p = unsafe { dm.Anonymous1.Anonymous2.dmPosition };
+    Some((p.x, p.y))
+}
+
+/// Mueve el monitor a esa posición del escritorio.
+pub fn place(device: &str, (x, y): (i32, i32)) -> Result<()> {
+    let name = wide(device);
+    let mut dm = devmode();
+    dm.Anonymous1.Anonymous2.dmPosition = POINTL { x, y };
+    dm.dmFields = DM_POSITION;
+    let r = unsafe { ChangeDisplaySettingsExW(PCWSTR(name.as_ptr()), Some(&dm), None, CDS_UPDATEREGISTRY, None) };
+    if r != DISP_CHANGE_SUCCESSFUL {
+        bail!("Windows no aceptó mover la pantalla a ({x}, {y}) ({})", r.0);
+    }
+    Ok(())
+}
+
+/// Posición para un monitor de w×h al lado indicado del monitor principal, centrado en ese lado.
+pub fn side_position(main: Rect, (w, h): (u32, u32), side: &str) -> (i32, i32) {
+    let (w, h) = (w as i32, h as i32);
+    match side {
+        "left" => (main.x - w, main.y + (main.h - h) / 2),
+        "top" => (main.x + (main.w - w) / 2, main.y - h),
+        "bottom" => (main.x + (main.w - w) / 2, main.y + main.h),
+        _ => (main.x + main.w, main.y + (main.h - h) / 2),
+    }
+}
+
 /// El modo y la orientación que mejor encajan con una pantalla de w×h. El booleano indica si
 /// la resolución es exacta.
 pub fn best_target(available: &[Mode], w: u32, h: u32, hz: u32) -> Option<(Target, bool)> {
@@ -166,13 +203,14 @@ pub fn create_virtual(vdd: &Vdd) -> Result<(u32, OutputInfo)> {
     }
 }
 
-/// Espera a que el monitor tenga el tamaño indicado (tras cambiar de modo) y lo devuelve.
-pub fn wait_output(name: &str, (w, h): (u32, u32)) -> Result<OutputInfo> {
+/// Espera a que el monitor tenga el tamaño (y la posición, si se indica) pedidos y lo devuelve.
+pub fn wait_output(name: &str, (w, h): (u32, u32), at: Option<(i32, i32)>) -> Result<OutputInfo> {
     let start = Instant::now();
     loop {
         let found = capture::outputs()?.into_iter().find(|o| o.name == name);
+        let placed = |o: &OutputInfo| at.is_none_or(|(x, y)| o.rect.x == x && o.rect.y == y);
         match found {
-            Some(o) if o.rect.w as u32 == w && o.rect.h as u32 == h => return Ok(o),
+            Some(o) if o.rect.w as u32 == w && o.rect.h as u32 == h && placed(&o) => return Ok(o),
             Some(o) if start.elapsed() > Duration::from_secs(3) => return Ok(o),
             None if start.elapsed() > Duration::from_secs(3) => bail!("el monitor virtual ha desaparecido"),
             _ => std::thread::sleep(Duration::from_millis(50)),
@@ -207,5 +245,14 @@ mod tests {
         assert_eq!((t, exact), (Target { mode: m(1600, 1200, 60), portrait: true }, false));
         assert_eq!(t.desktop(), (1200, 1600));
         assert!(!best_target(&list, 1866, 1021, 60).unwrap().0.portrait);
+    }
+
+    #[test]
+    fn side_positions_are_centered_and_adjacent() {
+        let main = Rect { x: 0, y: 0, w: 2880, h: 1800 };
+        assert_eq!(side_position(main, (1600, 1200), "right"), (2880, 300));
+        assert_eq!(side_position(main, (1600, 1200), "left"), (-1600, 300));
+        assert_eq!(side_position(main, (1600, 1200), "top"), (640, -1200));
+        assert_eq!(side_position(main, (1200, 1600), "bottom"), (840, 1800));
     }
 }

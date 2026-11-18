@@ -414,10 +414,10 @@ class Server:
         head = method == "HEAD"
         if path == "/ca.crt":
             return self.respond(writer, 200, self.certs.ca_crt.read_bytes(), "application/x-x509-ca-cert",
-                                {"Content-Disposition": 'attachment; filename="pantalla-poc-ca.crt"'}, head)
+                                {"Content-Disposition": 'attachment; filename="pantalla-secundaria-ca.crt"'}, head)
         if path == "/info":
+            # Sin cifrar y sin código: nada del nombre del equipo ni de sus otras direcciones.
             body = json.dumps({"httpsPort": self.args.port, "httpPort": self.args.http_port,
-                               "ips": certs.usable_ips(), "host": socket.gethostname(),
                                "caFingerprint": self.ca_fingerprint}).encode()
             return self.respond(writer, 200, body, "application/json", head_only=head)
         name = ROUTES.get(path, path.lstrip("/"))

@@ -4,12 +4,17 @@
 //! - Un certificado de servidor firmado por esa CA con las IP actuales del portátil; se
 //!   vuelve a emitir si aparece una IP nueva (por ejemplo, al activar el hotspot).
 //!
-//! Es compatible con los ficheros que creó la versión de Python (carpeta `certs/`), así que
-//! los dispositivos que ya confiaban en esa CA siguen funcionando.
+//! La CA está limitada ("name constraints", marcadas como críticas) a direcciones privadas y a
+//! `localhost`: aunque alguien robara su clave de `certs/`, los dispositivos que confían en
+//! ella no aceptarían un certificado suyo para ninguna web de internet. Tampoco puede crear
+//! otras CA (longitud de cadena 0) ni lleva el nombre del equipo, que vería cualquiera que se
+//! conecte. Las CA antiguas sin estas restricciones se rehacen solas al arrancar.
+//!
+//! Los ficheros son los mismos que usa la versión de Python (carpeta `certs/`).
 use anyhow::{Context, Result};
 use rcgen::{
-    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyIdMethod,
-    KeyPair, KeyUsagePurpose, SanType,
+    BasicConstraints, CertificateParams, CidrSubnet, DnType, ExtendedKeyUsagePurpose, GeneralSubtree, IsCa,
+    KeyIdMethod, KeyPair, KeyUsagePurpose, NameConstraints, SanType,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::collections::BTreeSet;
@@ -44,12 +49,38 @@ pub fn usable_ips() -> Vec<Ipv4Addr> {
         .collect()
 }
 
-fn is_dns_label(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 63
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-        && !s.starts_with('-')
-        && !s.ends_with('-')
+/// Redes para las que vale la CA: privadas, de enlace local, compartidas (VPN tipo Tailscale)
+/// y el propio equipo. Ninguna existe en internet.
+const PERMITTED_V4: [([u8; 4], u8); 6] = [
+    ([10, 0, 0, 0], 8),
+    ([172, 16, 0, 0], 12),
+    ([192, 168, 0, 0], 16),
+    ([100, 64, 0, 0], 10),
+    ([169, 254, 0, 0], 16),
+    ([127, 0, 0, 0], 8),
+];
+
+/// Si la IP cabe en las redes permitidas (solo esas pueden ir en el certificado del servidor:
+/// una sola fuera de ellas haría que los dispositivos lo rechazaran entero).
+pub fn ip_permitted(ip: Ipv4Addr) -> bool {
+    let ip = u32::from(ip);
+    PERMITTED_V4.iter().any(|(net, prefix)| {
+        let mask = u32::MAX.checked_shl(32 - *prefix as u32).unwrap_or(0);
+        ip & mask == u32::from(Ipv4Addr::from(*net)) & mask
+    })
+}
+
+fn name_constraints() -> NameConstraints {
+    let mut permitted: Vec<GeneralSubtree> = PERMITTED_V4
+        .iter()
+        .map(|(net, prefix)| GeneralSubtree::IpAddress(CidrSubnet::from_v4_prefix(*net, *prefix)))
+        .collect();
+    permitted.push(GeneralSubtree::DnsName("localhost".into()));
+    NameConstraints {
+        permitted_subtrees: permitted,
+        // No se usa IPv6: se excluye entero para que no quede ningún resquicio.
+        excluded_subtrees: vec![GeneralSubtree::IpAddress(CidrSubnet::from_v6_prefix([0; 16], 0))],
+    }
 }
 
 /// Identificador de clave al estilo de OpenSSL ("hash"): SHA-1 de la clave pública.
@@ -83,19 +114,37 @@ impl CertManager {
         let mut s: BTreeSet<Ipv4Addr> = local_ipv4s().into_iter().collect();
         s.insert(Ipv4Addr::LOCALHOST);
         s.extend(HOTSPOT_IPS);
+        s.retain(|ip| ip_permitted(*ip));
         s
+    }
+
+    /// La CA guardada ya tiene las restricciones (las de versiones anteriores no).
+    fn ca_is_current(&self) -> bool {
+        fs::read_to_string(&self.ca_crt)
+            .ok()
+            .and_then(|pem| CertificateParams::from_ca_cert_pem(&pem).ok())
+            .is_some_and(|p| p.name_constraints.is_some())
     }
 
     /// Crea lo que falte. Devuelve true si el certificado del servidor ha cambiado.
     pub fn ensure(&self) -> Result<bool> {
-        if !self.ca_crt.exists() || !self.ca_key.exists() {
+        let exists = self.ca_crt.exists() && self.ca_key.exists();
+        if !exists || !self.ca_is_current() {
+            if exists {
+                log::warn!(
+                    "Se rehace la CA del ordenador (ahora limitada a direcciones privadas y sin el nombre \
+                     del equipo). Hay que volver a instalarla en los dispositivos y borrar la anterior."
+                );
+            }
             self.create_ca()?;
             let _ = fs::remove_file(&self.crt);
+            let _ = fs::remove_file(&self.ips_file);
         }
         let current: BTreeSet<Ipv4Addr> = fs::read_to_string(&self.ips_file)
             .unwrap_or_default()
             .split_whitespace()
             .filter_map(|s| s.parse().ok())
+            .filter(|ip| ip_permitted(*ip))
             .collect();
         let wanted = self.wanted_ips();
         if self.crt.exists() && self.key.exists() && wanted.is_subset(&current) {
@@ -113,11 +162,17 @@ impl CertManager {
     }
 
     fn create_ca(&self) -> Result<()> {
+        use rand::Rng;
         let key = KeyPair::generate()?;
         let mut p = CertificateParams::default();
-        p.distinguished_name
-            .push(DnType::CommonName, format!("Pantalla PoC CA ({})", hostname()));
-        p.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        // Un identificador al azar para distinguirla en la lista de certificados del dispositivo
+        // si hay varios ordenadores, sin decir de quién es.
+        const ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+        let mut rng = rand::thread_rng();
+        let id: String = (0..4).map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char).collect();
+        p.distinguished_name.push(DnType::CommonName, format!("Pantalla secundaria - CA local {id}"));
+        p.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+        p.name_constraints = Some(name_constraints());
         p.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         p.key_identifier_method = KeyIdMethod::PreSpecified(sha1_key_id(&key));
         Self::validity(&mut p, 3650);
@@ -138,13 +193,10 @@ impl CertManager {
 
         let key = KeyPair::generate()?;
         let mut p = CertificateParams::default();
-        p.distinguished_name.push(DnType::CommonName, "pantalla-poc");
+        // Solo direcciones (y localhost): el nombre del equipo no, porque se ve al conectarse y
+        // porque la CA no permite otros nombres.
+        p.distinguished_name.push(DnType::CommonName, "Pantalla secundaria");
         p.subject_alt_names.push(SanType::DnsName("localhost".try_into()?));
-        let host = hostname();
-        if is_dns_label(&host) {
-            p.subject_alt_names.push(SanType::DnsName(host.clone().try_into()?));
-            p.subject_alt_names.push(SanType::DnsName(format!("{host}.local").try_into()?));
-        }
         for ip in ips {
             p.subject_alt_names.push(SanType::IpAddress(IpAddr::V4(*ip)));
         }
@@ -181,5 +233,68 @@ impl CertManager {
             .map(|b| format!("{b:02X}"))
             .collect::<Vec<_>>()
             .join(":"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pantalla-certs-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn only_private_ips_are_permitted() {
+        for ip in ["192.168.0.15", "192.168.137.1", "10.1.2.3", "172.16.0.1", "172.31.255.255", "100.64.0.1", "127.0.0.1", "169.254.1.1"] {
+            assert!(ip_permitted(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in ["8.8.8.8", "1.1.1.1", "172.32.0.1", "100.128.0.1", "193.168.0.1", "11.0.0.1"] {
+            assert!(!ip_permitted(ip.parse().unwrap()), "{ip}");
+        }
+    }
+
+    #[test]
+    fn new_ca_is_constrained_and_anonymous() {
+        let dir = temp_dir("nueva");
+        let cm = CertManager::new(&dir).unwrap();
+        assert!(cm.ensure().unwrap());
+        assert!(cm.ca_is_current());
+        let ca = CertificateParams::from_ca_cert_pem(&fs::read_to_string(&cm.ca_crt).unwrap()).unwrap();
+        assert!(matches!(ca.is_ca, IsCa::Ca(BasicConstraints::Constrained(0))));
+        assert_eq!(ca.name_constraints, Some(name_constraints()));
+        let ca_name = format!("{:?}", ca.distinguished_name);
+        assert!(ca_name.contains("CA local") && !ca_name.contains(&hostname()), "{ca_name}");
+        let leaf = CertificateParams::from_ca_cert_pem(&fs::read_to_string(&cm.crt).unwrap()).unwrap();
+        for san in &leaf.subject_alt_names {
+            match san {
+                SanType::DnsName(n) => assert_eq!(n.as_str(), "localhost"),
+                SanType::IpAddress(IpAddr::V4(ip)) => assert!(ip_permitted(*ip), "{ip}"),
+                other => panic!("nombre inesperado en el certificado: {other:?}"),
+            }
+        }
+        assert!(!cm.ensure().unwrap(), "no debe rehacerse si nada ha cambiado");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_ca_is_replaced() {
+        let dir = temp_dir("antigua");
+        let cm = CertManager::new(&dir).unwrap();
+        // CA como las de antes: sin restricciones y con el nombre del equipo.
+        let key = KeyPair::generate().unwrap();
+        let mut p = CertificateParams::default();
+        p.distinguished_name.push(DnType::CommonName, "Pantalla PoC CA (EQUIPO)");
+        p.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let old = p.self_signed(&key).unwrap();
+        fs::write(&cm.ca_crt, old.pem()).unwrap();
+        fs::write(&cm.ca_key, key.serialize_pem()).unwrap();
+        assert!(!cm.ca_is_current());
+        assert!(cm.ensure().unwrap());
+        assert!(cm.ca_is_current());
+        assert_ne!(fs::read_to_string(&cm.ca_crt).unwrap(), old.pem());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

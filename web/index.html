@@ -17,48 +17,24 @@
   <canvas id="cursor" hidden></canvas>
   <pre id="hud" hidden></pre>
   <div id="toast" role="status" hidden></div>
-  <button id="menu-btn" class="menu-btn" aria-label="Menú" hidden>⋯</button>
+  <button id="fs-hint" class="fs-hint" type="button" hidden>Toca para ver a pantalla completa</button>
 
-  <section id="panel" class="overlay">
+  <!-- Solo aparece mientras no hay imagen: conectando, pedir el código o avisar de un error.
+       Todos los ajustes se eligen en el panel del ordenador. -->
+  <section id="gate" class="overlay">
     <div class="card">
       <h1>Pantalla secundaria</h1>
       <p class="sub" id="host"></p>
-      <p id="status" class="status">Preparado.</p>
+      <p id="status" class="status">Conectando…</p>
       <p id="problem" class="warn" hidden></p>
-
-      <label>Código de emparejamiento
-        <input id="key" autocomplete="off" autocapitalize="characters" spellcheck="false"
-               placeholder="XXXX-XXXX" maxlength="9">
-      </label>
-      <label>Modo
-        <select id="mode">
-          <option value="extend" selected>Extender (pantalla nueva)</option>
-          <option value="mirror">Duplicar (espejo)</option>
-        </select>
-      </label>
-      <div class="row">
-        <label>Fotogramas
-          <select id="fps">
-            <option value="auto" selected>Auto</option>
-            <option>30</option><option>60</option><option>90</option><option>120</option>
-          </select>
+      <form id="key-form" hidden>
+        <label>Código de emparejamiento
+          <input id="key" autocomplete="off" autocapitalize="characters" spellcheck="false"
+                 placeholder="XXXX-XXXX" maxlength="9">
         </label>
-        <label>Calidad
-          <select id="bitrate">
-            <option value="10">10 Mbps</option><option value="20" selected>20 Mbps</option>
-            <option value="35">35 Mbps</option><option value="50">50 Mbps</option>
-          </select>
-        </label>
-        <label>Resolución
-          <select id="scale"><option value="1" selected>100 %</option><option value="0.75">75 %</option><option value="0.5">50 %</option></select>
-        </label>
-      </div>
-      <label class="check"><input type="checkbox" id="showhud" checked> Mostrar estadísticas</label>
-      <label class="check"><input type="checkbox" id="measure"> Medir latencia total
-        <span class="hint">(abre <code>localhost:8080/probe</code> en el portátil y déjala visible)</span></label>
-
-      <button id="start" class="primary">Conectar</button>
-      <button id="fullscreen" class="secondary" hidden>Pantalla completa</button>
+        <button class="primary" type="submit">Conectar</button>
+      </form>
+      <button id="retry" class="primary" type="button" hidden>Volver a conectar</button>
     </div>
   </section>
 

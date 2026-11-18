@@ -4,9 +4,12 @@
 //! que puede unirse cualquier dispositivo, también un iPad, que no admite Wi-Fi Direct. La
 //! red existe mientras exista este objeto. Si el portátil sigue conectado a otra Wi-Fi, la
 //! tarjeta comparte canal con ella.
+//!
+//! Nombre y contraseña son aleatorios y nuevos cada vez que se crea la red: el nombre se emite
+//! a todo el que esté cerca, así que no dice de quién es el ordenador ni deja seguirlo de un
+//! sitio a otro, y una contraseña vista en la pantalla no sirve la siguiente vez.
 use anyhow::{bail, Context, Result};
 use rand::Rng;
-use std::path::Path;
 use std::time::{Duration, Instant};
 use windows::core::HSTRING;
 use windows::Devices::WiFiDirect::{WiFiDirectAdvertisementPublisher, WiFiDirectAdvertisementPublisherStatus};
@@ -18,27 +21,28 @@ pub struct Hotspot {
     pub password: String,
 }
 
-/// Nombre y contraseña guardados en certs/hotspot.txt (el mismo formato que
-/// tools/hotspot.ps1), para que los dispositivos recuerden la red.
-fn credentials(file: &Path) -> Result<(String, String)> {
-    let saved = std::fs::read_to_string(file).unwrap_or_default();
-    let get = |k: &str| saved.lines().find_map(|l| l.strip_prefix(&format!("{k}="))).map(str::to_string);
-    let ssid = get("ssid").unwrap_or_else(|| {
-        let host: String = crate::certs::hostname().chars().take(23).collect();
-        format!("Pantalla-{host}")
-    });
-    let password = get("password").filter(|p| p.len() >= 8).unwrap_or_else(|| {
-        const ALPHABET: &[u8] = b"abcdefghijkmnpqrstuvwxyz23456789";
-        let mut rng = rand::thread_rng();
-        (0..12).map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char).collect()
-    });
-    std::fs::write(file, format!("ssid={ssid}\npassword={password}\n"))?;
-    Ok((ssid, password))
+fn random(alphabet: &[u8], n: usize) -> String {
+    let mut rng = rand::thread_rng(); // generador criptográfico del sistema
+    (0..n).map(|_| alphabet[rng.gen_range(0..alphabet.len())] as char).collect()
+}
+
+/// Nombre y contraseña nuevos.
+///
+/// - Nombre con el formato habitual de Wi-Fi Direct ("DIRECT-…", como impresoras y teles):
+///   no revela el nombre del equipo ni el del programa.
+/// - Contraseña de 16 caracteres al azar entre 32 (80 bits): inviable de adivinar aunque
+///   alguien capture la conexión y la ataque sin conexión. Va en grupos de 4 para teclearla.
+fn credentials() -> (String, String) {
+    const UPPER: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    const LOWER: &[u8] = b"abcdefghijkmnpqrstuvwxyz23456789";
+    let ssid = format!("DIRECT-{}-{}", random(UPPER, 2), random(UPPER, 6));
+    let password = (0..4).map(|_| random(LOWER, 4)).collect::<Vec<_>>().join("-");
+    (ssid, password)
 }
 
 impl Hotspot {
-    pub fn start(file: &Path) -> Result<Self> {
-        let (ssid, password) = credentials(file)?;
+    pub fn start() -> Result<Self> {
+        let (ssid, password) = credentials();
         let publisher = WiFiDirectAdvertisementPublisher::new()?;
         let adv = publisher.Advertisement()?;
         adv.SetIsAutonomousGroupOwnerEnabled(true)?;
@@ -60,11 +64,6 @@ impl Hotspot {
             }
         }
         Ok(Self { publisher, ssid, password })
-    }
-
-    /// Texto del QR estándar de Wi-Fi (la cámara del móvil lo entiende sin apps).
-    pub fn wifi_qr_text(&self) -> String {
-        format!("WIFI:T:WPA;S:{};P:{};;", self.ssid, self.password)
     }
 
     /// La red funciona de verdad: Windows puede seguir diciendo "Started" después de que la red

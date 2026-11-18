@@ -30,7 +30,7 @@
       <li>Abre <a id="https-link" href="#">la pantalla por HTTPS</a>.</li>
       <li>Chrome avisará de que la conexión no es privada: toca <b>Configuración avanzada</b> y después
         <b>Acceder a … (sitio no seguro)</b>.</li>
-      <li>Introduce el código que aparece en la consola del portátil y pulsa <b>Conectar</b>.</li>
+      <li>Introduce el código que aparece en el panel del ordenador y pulsa <b>Conectar</b>.</li>
     </ol>
     <p class="sub">Tendrás que aceptar el aviso de nuevo de vez en cuando. Para dejarlo resuelto, instala el certificado.</p>
   </div>
@@ -42,7 +42,7 @@
     <ol>
       <li>Ajustes → <b>Seguridad y privacidad</b> → <b>Más ajustes de seguridad</b> →
         <b>Instalar desde almacenamiento del dispositivo</b> → <b>Certificado de CA</b>.</li>
-      <li>Acepta el aviso y elige <code>pantalla-poc-ca.crt</code> en Descargas.</li>
+      <li>Acepta el aviso y elige <code>pantalla-secundaria-ca.crt</code> en Descargas.</li>
     </ol>
     <p><b>iPad / iPhone (Safari):</b></p>
     <ol>
@@ -50,8 +50,21 @@
       <li>Ajustes → <b>Perfil descargado</b> → <b>Instalar</b>.</li>
       <li>Ajustes → General → Información → <b>Ajustes de confianza de certificados</b> → actívalo.</li>
     </ol>
-    <p class="sub">Comprueba que la huella coincide con la que muestra el portátil:</p>
+    <p class="sub">Aparecerá como «Pantalla secundaria - CA local …». Solo vale para direcciones privadas
+      (las de tu red local), no para ninguna web de internet. Comprueba que la huella coincide con la
+      del ordenador:</p>
     <p class="fp" id="fp">…</p>
+  </div>
+
+  <h2>¿Tenías instalado un certificado anterior?</h2>
+  <div class="box">
+    <p>Los de versiones anteriores se llamaban «Pantalla PoC CA (…)» y no tenían esa limitación: bórralo.</p>
+    <ul>
+      <li><b>Android:</b> Ajustes → Seguridad y privacidad → Más ajustes de seguridad →
+        <b>Ver certificados de seguridad</b> → pestaña <b>Usuario</b> → tócalo → <b>Eliminar</b>.</li>
+      <li><b>iPad / iPhone:</b> Ajustes → General → <b>VPN y gestión de dispositivos</b> → el perfil →
+        <b>Eliminar perfil</b>.</li>
+    </ul>
   </div>
 
   <h2>Abrir la pantalla</h2>

@@ -7,7 +7,8 @@
   (nombre + contraseña WPA2) a la que puede unirse cualquier dispositivo, incluido el iPad,
   que no soporta Wi-Fi Direct. La red existe mientras este script esté abierto; Ctrl+C la cierra.
 
-  La contraseña se guarda en certs\hotspot.txt para que el móvil recuerde la red.
+  El nombre y la contraseña son aleatorios y nuevos cada vez (como en el host en Rust): el
+  nombre se emite a todo el que esté cerca y no debe revelar de quién es el ordenador.
   Si el portátil sigue conectado a otra Wi-Fi, la tarjeta tiene que compartir el canal y
   puede haber más variación de latencia: para medir lo mejor posible, desconéctala.
 
@@ -32,25 +33,18 @@ if ($PSVersionTable.PSEdition -ne 'Desktop') {
     exit $LASTEXITCODE
 }
 
-$stateFile = Join-Path $PSScriptRoot '..\certs\hotspot.txt'
-$saved = @{}
-if (Test-Path $stateFile) {
-    foreach ($line in Get-Content $stateFile) {
-        $k, $v = $line -split '=', 2
-        if ($v) { $saved[$k] = $v }
-    }
+# Texto aleatorio con un generador criptográfico. Alfabetos de 32 símbolos: 256 es múltiplo
+# de 32, así que el módulo no favorece a ninguno.
+$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+function Get-RandomText([string]$Alphabet, [int]$Length) {
+    $bytes = New-Object byte[] $Length
+    $rng.GetBytes($bytes)
+    -join ($bytes | ForEach-Object { $Alphabet[$_ % $Alphabet.Length] })
 }
-if (-not $Ssid) { $Ssid = if ($saved.ssid) { $saved.ssid } else { ('Pantalla-' + $env:COMPUTERNAME).Substring(0, [Math]::Min(32, 9 + $env:COMPUTERNAME.Length)) } }
-if (-not $Password) {
-    if ($saved.password) { $Password = $saved.password }
-    else {
-        $chars = 'abcdefghijkmnpqrstuvwxyz23456789'.ToCharArray()
-        $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-        $bytes = New-Object byte[] 12
-        $rng.GetBytes($bytes)
-        $Password = -join ($bytes | ForEach-Object { $chars[$_ % $chars.Length] })
-    }
-}
+# Formato habitual de Wi-Fi Direct ("DIRECT-…"): no dice de quién es ni qué programa es.
+if (-not $Ssid) { $Ssid = 'DIRECT-' + (Get-RandomText 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789' 2) + '-' + (Get-RandomText 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789' 6) }
+# 16 caracteres entre 32 (80 bits), en grupos de 4 para poder teclearla.
+if (-not $Password) { $Password = (1..4 | ForEach-Object { Get-RandomText 'abcdefghijkmnpqrstuvwxyz23456789' 4 }) -join '-' }
 if ($Password.Length -lt 8) { throw 'La contraseña debe tener al menos 8 caracteres.' }
 
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
@@ -70,9 +64,6 @@ if ($DryRun) {
     Write-Host "API Wi-Fi Direct disponible. Red preparada (sin emitir): $Ssid"
     exit 0
 }
-
-New-Item -ItemType Directory -Force (Split-Path $stateFile) | Out-Null
-Set-Content -Path $stateFile -Value "ssid=$Ssid", "password=$Password" -Encoding ASCII
 
 $publisher.Start()
 $deadline = (Get-Date).AddSeconds(10)

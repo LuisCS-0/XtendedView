@@ -1,25 +1,26 @@
 // Visor: recibe H.264 por WebSocket, lo decodifica con WebCodecs y lo pinta en un canvas.
-// Devuelve al portátil el táctil, el ratón y el lápiz.
+// Devuelve al ordenador el táctil, el ratón y el lápiz. No tiene ajustes propios: todo se
+// elige en el panel del ordenador, que le dice si mostrar estadísticas, medir la latencia o
+// pasar a pantalla completa.
 import { ClockSync, Window, b64ToBytes, findTimecodeBand, readTimecode, timecodeAge, storage } from './common.js';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('screen');
 const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
-const HEADER = 20; // ver FRAME_HEADER en host/main.py
+const HEADER = 20; // cabecera binaria de cada frame (ver host-rs/src/server.rs)
 
 const ui = {
-  panel: $('panel'), hud: $('hud'), status: $('status'), problem: $('problem'), host: $('host'),
-  cursor: $('cursor'),
-  key: $('key'), mode: $('mode'), fps: $('fps'), bitrate: $('bitrate'), scale: $('scale'), toast: $('toast'),
-  measure: $('measure'), showhud: $('showhud'),
-  start: $('start'), fullscreen: $('fullscreen'), menu: $('menu-btn'),
+  gate: $('gate'), status: $('status'), problem: $('problem'), host: $('host'),
+  keyForm: $('key-form'), key: $('key'), retry: $('retry'),
+  hud: $('hud'), toast: $('toast'), cursor: $('cursor'), fsHint: $('fs-hint'),
 };
 
 const st = {
   ws: null, want: false, connected: false,
   decoder: null, decoderConfig: null, configuring: false, queue: [], waitingKey: true,
   pending: new Map(), stream: null, last: null, rect: { x: 0, y: 0, w: 0, h: 0 },
-  lastHello: null, wakeLock: null, retryTimer: null,
+  lastHello: null, wakeLock: null, retryTimer: null, name: '',
+  settings: { stats: false, measure: false, fullscreen: false },
 };
 const sync = new ClockSync((msg) => send(msg));
 const cursor = { w: 0, h: 0, x: 0, y: 0, visible: false };
@@ -28,35 +29,40 @@ const m = {
   net: new Window(120), dec: new Window(120), e2e: new Window(240), host: null,
 };
 
-// ------------------------------------------------------------------ ajustes
-
-// Claves de localStorage. "fps2": con la opción Auto nueva, se ignora el valor guardado antes
-// (que solía ser el 60 por defecto).
-const STORE = { mode: 'mode', fps: 'fps2', bitrate: 'bitrate', scale: 'scale' };
+// ------------------------------------------------------------------ código y dispositivo
 
 const normKey = (s) => s.toUpperCase().replace(/[^A-Z0-9]/g, '');
 const formatKey = (s) => { const k = normKey(s); return k.length > 4 ? `${k.slice(0, 4)}-${k.slice(4, 8)}` : k; };
 
-function loadSettings() {
+/** El QR del ordenador abre la página con el código en la dirección (#k=…): se guarda y se quita. */
+function takeKeyFromUrl() {
   const k = new URLSearchParams(location.hash.slice(1)).get('k');
   if (k) {
     storage('key', normKey(k));
     history.replaceState(null, '', location.pathname + location.search);
   }
-  ui.key.value = formatKey(storage('key') || '');
-  for (const [id, key] of Object.entries(STORE)) {
-    const v = storage(key);
-    if (v && [...ui[id].options].some((o) => (o.value || o.text) === v)) ui[id].value = v;
-  }
-  ui.measure.checked = storage('measure') === '1';
-  ui.showhud.checked = storage('showhud') !== '0';
 }
 
-function saveSettings() {
-  storage('key', normKey(ui.key.value));
-  for (const [id, key] of Object.entries(STORE)) storage(key, ui[id].value);
-  storage('measure', ui.measure.checked ? '1' : '0');
-  storage('showhud', ui.showhud.checked ? '1' : '0');
+const savedKey = () => normKey(storage('key') || '');
+
+/** Nombre legible del dispositivo para el panel ("SM-F966B · Android · Chrome"). */
+async function deviceName() {
+  const ua = navigator.userAgent;
+  let model = '';
+  let platform = navigator.userAgentData?.platform || '';
+  try {
+    const v = await navigator.userAgentData?.getHighEntropyValues?.(['model', 'platform']);
+    model = v?.model || '';
+    platform = v?.platform || platform;
+  } catch { /* opcional */ }
+  if (!platform) {
+    platform = /iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1) ? 'iPad'
+      : /iPhone/.test(ua) ? 'iPhone' : /Android/.test(ua) ? 'Android'
+        : /Windows/.test(ua) ? 'Windows' : /Mac/.test(ua) ? 'Mac' : /Linux/.test(ua) ? 'Linux' : '';
+  }
+  const browser = /Edg\//.test(ua) ? 'Edge' : /SamsungBrowser/.test(ua) ? 'Samsung Internet'
+    : /Chrome\//.test(ua) ? 'Chrome' : /Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : '';
+  return [model, platform, browser].filter(Boolean).join(' · ') || 'Dispositivo';
 }
 
 function supportProblem() {
@@ -82,15 +88,13 @@ function connect() {
   const ws = new WebSocket(`${proto}://${location.host}/ws?role=viewer`);
   ws.binaryType = 'arraybuffer';
   st.ws = ws;
-  setStatus('Conectando…');
-  updateControls();
+  showGate('Conectando…');
   ws.onopen = () => {
     st.connected = true;
     st.lastHello = null;
     sync.start();
     sendHello();
-    setStatus('Conectado. Esperando vídeo…');
-    updateControls();
+    setStatus('Conectado. Esperando la imagen…');
   };
   ws.onmessage = (ev) => (typeof ev.data === 'string' ? onText(JSON.parse(ev.data)) : onFrame(ev.data));
   ws.onclose = () => {
@@ -100,15 +104,14 @@ function connect() {
     sync.stop();
     resetDecoder();
     if (st.want) {
-      setStatus('Conexión perdida. Reintentando…');
-      showPanel(true);
+      showGate('Conexión perdida. Reintentando…');
       st.retryTimer = setTimeout(connect, 1000);
     }
-    updateControls();
   };
 }
 
-function disconnect(reason) {
+/** Deja de intentar conectar y muestra el motivo (y, si hace falta, el campo del código). */
+function stop(reason, { askKey = false, retry = false } = {}) {
   st.want = false;
   clearTimeout(st.retryTimer);
   if (st.ws) { const ws = st.ws; st.ws = null; ws.close(); }
@@ -119,24 +122,24 @@ function disconnect(reason) {
   st.last?.close();
   st.last = null;
   ui.cursor.hidden = true;
+  ui.hud.hidden = true;
+  ui.fsHint.hidden = true;
   st.wakeLock?.release?.().catch(() => {});
   st.wakeLock = null;
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
   layout();
-  setStatus(reason || 'Desconectado.');
-  showPanel(true);
-  updateControls();
+  showGate(reason, { askKey, retry });
 }
 
+/** Tamaño real de la pantalla del dispositivo; el ordenador decide la resolución final. */
 function targetSize() {
   const dpr = window.devicePixelRatio || 1;
-  const s = Number(ui.scale.value) || 1;
-  return { w: Math.round(innerWidth * dpr * s), h: Math.round(innerHeight * dpr * s) };
+  return { w: Math.round(innerWidth * dpr), h: Math.round(innerHeight * dpr) };
 }
 
 // ------------------------------------------------------------------ frecuencia de pantalla
-// Con "Auto" se captura a la frecuencia real de la pantalla (120 Hz en el Fold): a más
-// frecuencia, menos espera hasta la siguiente captura y menos retraso al mostrar cada frame.
+// El ordenador captura a la frecuencia real de la pantalla (120 Hz en el Fold) si el panel
+// está en «Automático»: a más frecuencia, menos espera hasta la siguiente captura.
 
 const RATES = [30, 60, 90, 120]; // lo que admite el host
 let displayHz = 60;
@@ -168,21 +171,20 @@ async function detectRefresh() {
   // Mínimo 60: el navegador puede frenar las animaciones (ahorro de batería, pestaña tapada)
   // y medir menos de lo que da la pantalla.
   const rate = RATES.filter((r) => r >= 60).reduce((a, b) => (Math.abs(b - hz) < Math.abs(a - hz) ? b : a));
-  ui.fps.options[0].textContent = `Auto (${rate})`;
   if (rate !== displayHz) {
     displayHz = rate;
-    if (st.connected && ui.fps.value === 'auto') sendHello();
+    if (st.connected) sendHello();
   }
-}
-
-function targetFps() {
-  return ui.fps.value === 'auto' ? displayHz : Number(ui.fps.value);
 }
 
 function sendHello() {
   const { w, h } = targetSize();
-  const hello = { t: 'hello', key: normKey(ui.key.value), mode: ui.mode.value, w, h,
-    fps: targetFps(), bitrate: Number(ui.bitrate.value) };
+  const hello = {
+    t: 'hello', key: savedKey(), w, h, hz: displayHz,
+    dpr: window.devicePixelRatio || 1, name: st.name,
+    // Para el host en Python, que no tiene panel: valores por defecto.
+    fps: displayHz, bitrate: 20,
+  };
   const sig = JSON.stringify(hello);
   if (sig === st.lastHello) return;
   st.lastHello = sig;
@@ -194,13 +196,30 @@ function onText(msg) {
     case 'pong': sync.onPong(msg); break;
     case 'config': configure(msg); break;
     case 'stats': m.host = msg; break;
+    case 'settings': applySettings(msg); break;
     case 'cursor': Object.assign(cursor, { x: msg.x, y: msg.y, visible: msg.v }); placeCursor(); break;
     case 'cursorShape': setCursorShape(msg); break;
-    case 'auth': disconnect('Código incorrecto. Usa el que aparece en la consola del portátil.'); break;
-    case 'bye': disconnect(msg.reason); break;
-    case 'error': setStatus(msg.message); showPanel(true); break;
+    case 'auth':
+      storage('key', '');
+      stop('El código no es correcto. Escanea otra vez el código QR del ordenador o escribe su código:', { askKey: true });
+      break;
+    // Apagada desde el ordenador: al volver a encenderla habrá otro código, no tiene sentido reintentar.
+    case 'bye': stop(msg.reason, { retry: msg.retry !== false }); break;
+    case 'error': showToast(msg.message); break;
     case 'info': showToast(msg.message); break;
   }
+}
+
+/** Ajustes que manda el panel del ordenador. */
+function applySettings(s) {
+  const was = st.settings;
+  st.settings = { stats: Boolean(s.stats), measure: Boolean(s.measure), fullscreen: Boolean(s.fullscreen) };
+  if (!st.settings.measure) m.e2e.clear();
+  if (was.fullscreen && !st.settings.fullscreen && isFullscreen()) {
+    document.exitFullscreen?.().catch(() => {});
+  }
+  updateFullscreenHint();
+  renderHud();
 }
 
 let toastTimer;
@@ -230,8 +249,7 @@ async function configure(msg) {
   }
   if (!chosen) {
     st.configuring = false;
-    setStatus(`Este dispositivo no puede decodificar ${msg.codec}.`);
-    showPanel(true);
+    showGate(`Este dispositivo no puede decodificar ${msg.codec}.`);
     return;
   }
   resetDecoder();
@@ -247,7 +265,9 @@ async function configure(msg) {
   queued.forEach(decode);
   m.net.clear(); m.dec.clear(); m.e2e.clear();
   setStatus(`Recibiendo ${msg.width}×${msg.height} a ${msg.fps} fps (${msg.codec}).`);
-  showPanel(false);
+  hideGate();
+  requestWakeLock();
+  updateFullscreenHint();
 }
 
 function resetDecoder() {
@@ -306,7 +326,7 @@ function onDecoded(frame) {
   st.last = frame;
   m.frames++;
   if (t !== undefined) m.dec.push(now - t);
-  if (ui.measure.checked && sync.ready) measureE2E(frame);
+  if (st.settings.measure && sync.ready) measureE2E(frame);
   send({ t: 'ack', seq });
   if (st.pending.size > 240) st.pending.clear();
 }
@@ -453,15 +473,34 @@ canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 // ------------------------------------------------------------------ interfaz
 
 function setStatus(text) { ui.status.textContent = text; }
-function showPanel(show) { ui.panel.hidden = !show; }
 
-function updateControls() {
-  ui.start.textContent = st.want ? 'Desconectar' : 'Conectar';
-  ui.menu.hidden = !st.connected;
-  ui.fullscreen.hidden = !st.connected;
+function showGate(text, { askKey = false, retry = false } = {}) {
+  ui.gate.hidden = false;
+  setStatus(text);
+  ui.keyForm.hidden = !askKey;
+  ui.retry.hidden = !retry;
+  if (askKey) {
+    ui.key.value = formatKey(savedKey());
+    ui.key.focus();
+  }
 }
 
-// Ni la pantalla completa ni el bloqueo de suspensión deben retrasar la conexión:
+function hideGate() { ui.gate.hidden = true; }
+
+// ------------------------------------------------------------------ pantalla completa
+// El navegador solo deja ponerse a pantalla completa tras un toque: cuando el panel la pide,
+// se muestra un aviso y ese toque no se envía al ordenador.
+
+const isFullscreen = () => Boolean(document.fullscreenElement || document.webkitFullscreenElement)
+  || matchMedia('(display-mode: fullscreen)').matches; // abierta desde la pantalla de inicio
+
+const canFullscreen = () => Boolean(document.fullscreenEnabled || document.webkitFullscreenEnabled);
+
+function updateFullscreenHint() {
+  ui.fsHint.hidden = !(st.settings.fullscreen && st.stream && !isFullscreen() && canFullscreen());
+}
+
+// Ni la pantalla completa ni el bloqueo de suspensión deben retrasar nada:
 // algunos navegadores tardan o no responden nunca a estas peticiones.
 function enterFullscreen() {
   const el = document.documentElement;
@@ -479,7 +518,7 @@ function requestWakeLock() {
 const fmt = (v, d = 1) => (Number.isFinite(v) ? v.toFixed(d) : '–');
 
 function renderHud() {
-  const show = ui.showhud.checked && st.connected && st.stream;
+  const show = st.settings.stats && st.connected && st.stream;
   ui.hud.hidden = !show;
   if (!show) return;
   const s = st.stream;
@@ -495,13 +534,13 @@ function renderHud() {
   ];
   if (h) {
     lines.push(h.encMs50 !== undefined
-      ? `Portátil   ${h.encFps} fps · ${h.dropped} descartados · captura→cod. ${fmt(h.encMs50)} ms (p95 ${fmt(h.encMs95)})`
-      : `Portátil   ${h.encFps} fps · ${h.dropped} descartados · var. cod. ${fmt(h.encJitter50)}/${fmt(h.encJitter95)} ms`);
+      ? `Ordenador  ${h.encFps} fps · ${h.dropped} descartados · captura→cod. ${fmt(h.encMs50)} ms (p95 ${fmt(h.encMs95)})`
+      : `Ordenador  ${h.encFps} fps · ${h.dropped} descartados · var. cod. ${fmt(h.encJitter50)}/${fmt(h.encJitter95)} ms`);
   }
-  if (ui.measure.checked) {
+  if (st.settings.measure) {
     lines.push(m.e2e.count
       ? `TOTAL      ${fmt(m.e2e.avg, 0)} ms (mín ${fmt(m.e2e.min, 0)} · p95 ${fmt(m.e2e.pct(0.95), 0)})`
-      : 'TOTAL      sin señal: abre /probe en el portátil y déjala visible');
+      : 'TOTAL      sin señal: abre la sonda en el ordenador y déjala visible');
   }
   ui.hud.textContent = lines.join('\n');
 }
@@ -541,35 +580,55 @@ document.addEventListener('visibilitychange', () => {
   detectRefresh();
 });
 
-ui.start.addEventListener('click', () => {
-  if (st.want) { disconnect(); return; }
-  saveSettings();
-  if (normKey(ui.key.value).length !== 8) {
-    setStatus('Introduce el código de 8 caracteres que aparece en la consola del portátil.');
-    ui.key.focus();
+document.addEventListener('fullscreenchange', updateFullscreenHint);
+document.addEventListener('webkitfullscreenchange', updateFullscreenHint);
+ui.fsHint.addEventListener('click', (e) => {
+  e.preventDefault();
+  enterFullscreen();
+  ui.fsHint.hidden = true;
+});
+
+ui.keyForm.addEventListener('submit', (e) => {
+  e.preventDefault();
+  const k = normKey(ui.key.value);
+  if (k.length !== 8) {
+    setStatus('El código tiene 8 caracteres: lo verás en el panel del ordenador.');
     return;
   }
-  enterFullscreen();
+  storage('key', k);
   connect();
 });
-ui.fullscreen.addEventListener('click', enterFullscreen);
-ui.menu.addEventListener('click', () => showPanel(ui.panel.hidden));
 ui.key.addEventListener('blur', () => { ui.key.value = formatKey(ui.key.value); });
-for (const id of ['mode', 'fps', 'bitrate', 'scale']) {
-  ui[id].addEventListener('change', () => { saveSettings(); if (st.connected) sendHello(); });
-}
-ui.measure.addEventListener('change', () => { saveSettings(); m.e2e.clear(); });
-ui.showhud.addEventListener('change', () => { saveSettings(); renderHud(); });
+ui.retry.addEventListener('click', () => connect());
 
 // ------------------------------------------------------------------ inicio
 
-loadSettings();
+takeKeyFromUrl();
 layout();
 detectRefresh();
 ui.host.textContent = location.host;
 const problem = supportProblem();
-if (problem) {
-  ui.problem.innerHTML = problem;
-  ui.problem.hidden = false;
-  ui.start.disabled = true;
-}
+// Si el QR nuevo (cada encendido trae otro código) se abre en esta misma pestaña, el
+// navegador solo cambia el "#k=..." sin recargar la página.
+addEventListener('hashchange', () => {
+  const k = new URLSearchParams(location.hash.slice(1)).get('k');
+  if (!k || problem) return;
+  const changed = normKey(k) !== savedKey();
+  takeKeyFromUrl();
+  if (!changed && st.want) return; // ya conectado (o conectando) con ese código
+  if (st.ws) { const ws = st.ws; st.ws = null; ws.close(); }
+  connect();
+});
+
+deviceName().then((name) => {
+  st.name = name;
+  if (problem) {
+    ui.problem.innerHTML = problem;
+    ui.problem.hidden = false;
+    showGate('No se puede mostrar la pantalla en este navegador.');
+  } else if (savedKey().length === 8) {
+    connect(); // abierto desde el QR (o con el código ya guardado): se conecta solo
+  } else {
+    showGate('Escanea el código QR que aparece en el ordenador, o escribe su código:', { askKey: true });
+  }
+});

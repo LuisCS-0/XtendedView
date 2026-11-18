@@ -9,10 +9,40 @@ captura (Desktop Duplication) → H.264 (QuickSync) → WebSocket sobre HTTPS �
                        ratón / táctil inyectados en Windows  ←──────────  táctil, ratón y lápiz
 ```
 
-**Estado:** modo espejo (muestra la pantalla principal). El modo "extender" necesita un
-monitor virtual y es la fase siguiente.
+## Uso
 
-Hay dos versiones del programa del portátil, con el mismo protocolo y el mismo visor web:
+1. Arranca `host-rs\target\release\pantalla-host.exe` desde la carpeta del proyecto. Se abre el
+   **panel de control** en una ventana (también en `http://localhost:8080/panel`).
+2. Pulsa el **botón de encendido**. Cada encendido crea un **código de emparejamiento nuevo**, así
+   que hay que volver a escanear el QR. Mientras está apagada, ningún dispositivo puede conectarse,
+   no hay red propia ni monitor virtual. El botón **Apagar** de arriba lo detiene todo.
+3. En el panel, elige la red (la del ordenador o una red Wi-Fi propia, sin router) y pulsa
+   **Aplicar**. Elige también el modo (pantalla adicional o espejo). Para la pantalla adicional,
+   indica en qué lado del ordenador tienes el dispositivo.
+4. En el móvil o la tablet, **escanea con la cámara el código QR** del panel. Con red propia hay
+   dos: el primero une el dispositivo a la red y el segundo abre la pantalla.
+
+El dispositivo solo muestra la pantalla, sin menús. Todo se ajusta desde el panel del ordenador:
+
+- **Pantalla completa** en el dispositivo. El navegador pide un toque para activarla.
+- **Fotogramas, calidad y resolución.**
+- **Estadísticas** encima de la imagen y **medición de la latencia**.
+- **Información de la conexión:** latencias, fotogramas, velocidad, resolución, codificador…
+- **Resolución exacta:** un botón la registra en el driver, con el aviso de administrador de Windows.
+- **Desconectar el dispositivo** y **cambiar el código de emparejamiento**.
+
+Los ajustes se guardan en `certs\ajustes.json`. Al encender, la consola del host también muestra
+el código QR. Con `--no-panel` no se abre la ventana del panel; con `--start` arranca ya
+encendida; con `--hotspot` se elige la red propia.
+
+El host no consulta el nombre de la Wi-Fi del ordenador: desde Windows 11 24H2 eso cuenta como usar
+la ubicación, y aparecería el aviso en la barra de tareas. Para saber si el ordenador sigue
+conectado a otra Wi-Fi, mira las tarjetas de red y sus direcciones.
+
+## Versiones del programa del ordenador
+
+Hay dos versiones, con el mismo protocolo y el mismo visor web. El panel, los QR y la pantalla
+adicional solo están en la de Rust:
 
 | | Rust (`host-rs/`), recomendada | Python (`host/`), prototipo |
 |---|---|---|
@@ -29,9 +59,9 @@ host-rs\target\release\pantalla-host.exe
 ```
 
 Hay que lanzarlo desde la carpeta del proyecto, o indicarla con `--root`, para que encuentre `web\`
-y `certs\`. Reutiliza el certificado y el código de emparejamiento de la versión Python, así que
-los dispositivos ya configurados siguen funcionando. Opciones: `--monitor N`,
-`--max-inflight-ms`, `--port`, `--http-port`, y `-v` para el diagnóstico del codificador.
+y `certs\`. Comparte el certificado con la versión Python (los dos crean la misma CA limitada).
+Opciones: `--no-panel`, `--start`, `--hotspot`, `--max-inflight-ms`, `--port`,
+`--http-port`, `--list` (monitores) y `-v` (diagnóstico).
 
 Comparación en el mismo momento y con la misma sonda (visor en el propio portátil, 2048×1280 a
 60 fps):
@@ -48,14 +78,15 @@ de monitor virtual de Parsec (Parsec VDD), firmado por Parsec:
 
 1. Instálalo una vez, como administrador:
    https://builds.parsec.app/vdd/parsec-vdd-0.41.0.0.exe (la versión marcada como estable).
-2. Arranca el host. El banner debe decir «Modo extender: disponible».
-3. En el visor, elige **Modo → Extender**. El host conecta un monitor virtual con la resolución
-   más parecida a la de la pantalla del dispositivo, lo captura y lo quita al desconectar. Si el
-   host se cierra de golpe, el driver quita el monitor solo en un segundo.
+2. Arranca el host. El banner debe decir «Pantalla adicional: disponible».
+3. En el panel, elige **Pantalla adicional** y el lado del ordenador en el que está el
+   dispositivo. El host conecta un monitor virtual con la resolución más parecida a la de la
+   pantalla del dispositivo, lo coloca en ese lado (centrado), lo captura y lo quita al
+   desconectar. Si el host se cierra de golpe, el driver quita el monitor solo en un segundo.
 
 Si ninguno de los modos de serie del driver coincide con tu pantalla (el Fold desplegado, por
-ejemplo, es casi cuadrado), el visor muestra un aviso con la resolución exacta. Regístrala una vez,
-desde PowerShell como administrador y con el visor desconectado:
+ejemplo, es casi cuadrado), el panel ofrece un botón **Registrar resolución exacta**. También se
+puede hacer a mano, desde PowerShell como administrador y con el dispositivo desconectado:
 
 ```
 tools\vdd-resoluciones.ps1 -Add 2184x1968@120
@@ -146,6 +177,8 @@ Con el host en Rust:
 host-rs\target\release\pantalla-host.exe --hotspot
 ```
 
+(o elige «Red propia» en el panel y pulsa Aplicar; la red se crea al encender).
+
 Con la versión Python, en una consola aparte:
 
 ```
@@ -154,12 +187,42 @@ powershell -ExecutionPolicy Bypass -File tools\hotspot.ps1
 
 Las dos formas crean una red Wi-Fi (WPA2) desde el portátil, sin necesidad de internet, y muestran
 el nombre y la contraseña. Conecta el Fold a esa red y abre `https://192.168.137.1:8443/`. La red
-existe mientras el host (o el script) esté abierto. El nombre y la contraseña se guardan en
-`certs\hotspot.txt` para que el móvil la recuerde. El portátil puede seguir conectado a la Wi-Fi
-de casa a la vez. Android avisará de que la red no tiene internet: elige mantener la conexión.
+existe mientras el host esté encendido (o el script abierto). El nombre (`DIRECT-…`) y la
+contraseña son aleatorios y cambian cada vez, así que hay que volver a escanear el QR de la red.
+El portátil puede seguir conectado a la Wi-Fi de casa a la vez. Android avisará de que la red no
+tiene internet: elige mantener la conexión.
 
 Si el portátil sigue conectado a otra Wi-Fi, la tarjeta tiene que repartirse entre las dos y puede
 haber más variación de latencia. Para medir lo mejor posible, desconéctala.
+
+## Seguridad
+
+Pensado para usarlo también en sitios públicos:
+
+- **Apagada**, el host corta cualquier conexión que no venga del propio ordenador: desde fuera no
+  se ven ni las páginas ni el certificado. Tampoco hay red propia ni monitor virtual.
+- **Red propia**: nombre y contraseña aleatorios en cada encendido. El nombre tiene el formato de
+  Wi-Fi Direct (`DIRECT-…`, como impresoras y teles), así que no dice de quién es el ordenador ni
+  deja seguirlo de un sitio a otro. La contraseña tiene 16 caracteres (80 bits), suficiente aunque
+  alguien capture la conexión e intente adivinarla después. Solo se aceptan dispositivos de esa red:
+  si el portátil sigue en la Wi-Fi de una cafetería, los equipos de esa red no pueden conectarse.
+- **Red del ordenador**: cualquiera de esa red llega al host, y lo protege el código de
+  emparejamiento. En una Wi-Fi pública es mejor la red propia.
+- **Código de emparejamiento**: 8 caracteres (31⁸ combinaciones), nuevo en cada encendido. Se
+  comprueba un intento cada vez y cada fallo hace esperar un segundo, aunque se abran muchas
+  conexiones a la vez (como mucho un intento fallido por segundo).
+- La imagen y el control solo viajan cifrados (HTTPS). Sin cifrar solo se sirve lo necesario para
+  instalar el certificado, sin el nombre del equipo.
+- El panel de control solo responde desde el propio ordenador.
+- **Certificado del ordenador (CA)**, el que se instala en los dispositivos: está limitado a
+  direcciones privadas y a `localhost` (restricciones de nombre críticas, comprobadas con OpenSSL y
+  con Windows). Aunque alguien robara su clave de `certs\`, no le serviría para suplantar ninguna web
+  de internet en esos dispositivos. Tampoco puede crear otras CA y no lleva el nombre del equipo:
+  se llama «Pantalla secundaria - CA local XXXX», con un identificador al azar.
+
+Las CA de versiones anteriores («Pantalla PoC CA (equipo)») no tenían estas restricciones. El host
+las rehace solo al arrancar, así que hay que **volver a instalar el certificado** desde `/setup` y
+**borrar el anterior** de cada dispositivo. La página `/setup` explica cómo.
 
 ## Opciones
 

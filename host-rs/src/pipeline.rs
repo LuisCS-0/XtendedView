@@ -134,7 +134,20 @@ fn run(s: &Settings, events: &UnboundedSender<Event>, ctrl: &mpsc::Receiver<Cont
     let _mmcss = unsafe { AvSetMmThreadCharacteristicsW(w!("Capture"), &mut task) };
     let _mf = MfGuard::new()?;
     let gpu = Gpu::open(s.monitor)?;
-    let mut dup = Duplicator::new(&gpu)?;
+    // Si una captura anterior de este monitor aún se está cerrando, Windows rechaza la nueva
+    // durante un momento: se reintenta un par de segundos.
+    let mut tries = 0;
+    let mut dup = loop {
+        match Duplicator::new(&gpu) {
+            Ok(d) => break d,
+            Err(e) if tries < 20 && !stop.load(Ordering::Relaxed) => {
+                tries += 1;
+                log::debug!("captura: {e:#}; reintentando");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => return Err(e),
+        }
+    };
     let (src_w, src_h) = (dup.width, dup.height);
     // El conversor se crea con las medidas reales de la primera imagen (con el monitor en
     // vertical, la imagen capturada llega sin girar).
