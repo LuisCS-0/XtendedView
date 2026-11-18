@@ -2,27 +2,74 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "pantalla-host",
+      "name": "xtendedview-python",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["-u", "host/main.py"],
+      "runtimeArgs": [
+        "-u",
+        "host/main.py"
+      ],
       "port": 8080
     },
     {
-      "name": "pantalla-host-rs",
-      "runtimeExecutable": "host-rs/target/release/pantalla-host.exe",
-      "runtimeArgs": ["--no-panel"],
+      "name": "xtendedview",
+      "runtimeExecutable": "host-rs/target/release/xtendedview.exe",
+      "runtimeArgs": [
+        "--no-panel"
+      ],
       "port": 8080
     },
     {
-      "name": "pantalla-host-rs-pruebas",
-      "runtimeExecutable": "host-rs/target/release/pantalla-host.exe",
-      "runtimeArgs": ["--no-panel", "--port", "9443", "--http-port", "9080"],
+      "name": "xtendedview-pruebas",
+      "runtimeExecutable": "host-rs/target/release/xtendedview.exe",
+      "runtimeArgs": [
+        "--no-panel",
+        "--port",
+        "9443",
+        "--http-port",
+        "9080"
+      ],
       "port": 9080
     },
     {
-      "name": "pantalla-host-rs-red",
-      "runtimeExecutable": "host-rs/target/release/pantalla-host.exe",
-      "runtimeArgs": ["--hotspot", "--no-panel"],
+      "name": "xtendedview-pruebas-panel",
+      "runtimeExecutable": "host-rs/target/release/xtendedview.exe",
+      "runtimeArgs": [
+        "--port",
+        "9443",
+        "--http-port",
+        "9080"
+      ],
+      "port": 9080
+    },
+    {
+      "name": "xtendedview-pruebas-aparte",
+      "runtimeExecutable": "host-rs/target/pruebas/release/xtendedview.exe",
+      "runtimeArgs": [
+        "--no-panel",
+        "--port",
+        "9443",
+        "--http-port",
+        "9080"
+      ],
+      "port": 9080
+    },
+    {
+      "name": "xtendedview-diagnostico",
+      "runtimeExecutable": "powershell",
+      "runtimeArgs": [
+        "-NoProfile",
+        "-Command",
+        "$env:PANTALLA_GPU_TIEMPO='1'; & 'host-rs/target/pruebas/release/xtendedview.exe' --no-panel --port 9443 --http-port 9080 -v"
+      ],
+      "port": 9080
+    },
+    {
+      "name": "xtendedview-red",
+      "runtimeExecutable": "host-rs/target/release/xtendedview.exe",
+      "runtimeArgs": [
+        "--hotspot",
+        "--no-panel"
+      ],
       "port": 8080
     }
   ]

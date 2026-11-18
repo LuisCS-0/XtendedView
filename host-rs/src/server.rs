@@ -1,20 +1,23 @@
-//! Servidor HTTPS/WebSocket, sesión del dispositivo y panel de control del ordenador.
+//! Servidor HTTPS/WebSocket, sesiones de los dispositivos y panel de control del ordenador.
 //!
 //! - Cada puerto acepta HTTPS y HTTP (se mira el primer byte). Fuera de este ordenador, todo
 //!   menos la página de configuración se redirige a HTTPS: la pantalla nunca viaja sin cifrar.
-//! - Un único dispositivo activo, autenticado con el código de emparejamiento.
-//! - Los ajustes (red, modo, lado, fotogramas…) se eligen en el panel del ordenador; el
-//!   dispositivo solo informa de su pantalla y muestra la imagen.
-//! - Control de flujo por confirmaciones: si el dispositivo se retrasa, se descartan frames
-//!   y se pide un keyframe en vez de acumular retraso.
+//! - Varios dispositivos a la vez, cada uno con sus ajustes (pantalla adicional o espejo, lado,
+//!   monitor, fotogramas, calidad…) y por la conexión que quiera (red del ordenador, red propia
+//!   o cable). Se autentican con el código de emparejamiento y, además, hay que aceptarlos en
+//!   el panel del ordenador.
+//! - Los ajustes se eligen en el panel; los dispositivos solo informan de su pantalla y
+//!   muestran la imagen.
+//! - Control de flujo por confirmaciones: si un dispositivo se retrasa, se descartan frames y se
+//!   pide un keyframe en vez de acumular retraso.
 use crate::capture::{self, OutputInfo};
 use crate::certs::{self, CertManager};
 use crate::clock::now_ms;
 use crate::display::{self, Target};
 use crate::hotspot::Hotspot;
-use crate::input::{Injector, PointerEvent};
-use crate::pipeline::{Controller, Event, Pipeline, Settings};
-use crate::prefs::{self, Prefs};
+use crate::input::{Injector, PointerEvent, Rect};
+use crate::pipeline::{Capture, Controller, Event, Settings};
+use crate::prefs::{self, DevicePrefs, Prefs};
 use crate::sys;
 use crate::vdd::Vdd;
 use crate::Args;
@@ -32,7 +35,7 @@ use std::sync::{Arc, Mutex as StdMutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, Mutex, Notify};
+use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
@@ -41,9 +44,13 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
 /// Lo único que se sirve sin cifrar a otros dispositivos: lo necesario para instalar el certificado.
-const PLAIN_HTTP_PATHS: [&str; 5] = ["/setup", "/ca.crt", "/info", "/style.css", "/icon.svg"];
-/// Solo para este ordenador: el panel de control y sus códigos QR.
-const LOCAL_ONLY_PATHS: [&str; 6] = ["/panel", "/panel.js", "/panel.css", "/qr/url.svg", "/qr/wifi.svg", "/qr/setup.svg"];
+const PLAIN_HTTP_PATHS: [&str; 6] = ["/setup", "/ca.crt", "/info", "/style.css", "/favicon.ico", "/icon-192.png"];
+/// Solo para este ordenador: el panel de control (y sus códigos QR, todo lo de /qr/).
+const LOCAL_ONLY_PATHS: [&str; 3] = ["/panel", "/panel.js", "/panel.css"];
+/// Dispositivos a la vez.
+const MAX_DEVICES: usize = 4;
+/// Tiempo para aceptar un dispositivo en el panel.
+const APPROVAL_TIMEOUT: Duration = Duration::from_secs(90);
 
 trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
@@ -65,13 +72,7 @@ fn certified_key(cm: &CertManager) -> Result<Arc<CertifiedKey>> {
     Ok(Arc::new(CertifiedKey::new(chain, signer)))
 }
 
-// ------------------------------------------------------------------ sesión
-
-struct Viewer {
-    id: u64,
-    tx: mpsc::UnboundedSender<Message>,
-    acked: Arc<AtomicU32>,
-}
+// ------------------------------------------------------------------ sesiones
 
 /// Lo que el dispositivo cuenta de sí mismo al conectarse.
 #[derive(Clone)]
@@ -98,41 +99,7 @@ impl Client {
     }
 }
 
-struct Stream {
-    settings: Settings,
-    ctrl: Controller,
-    pipeline: Option<Pipeline>,
-    forward: tokio::task::JoinHandle<()>,
-}
-
-impl Stream {
-    /// Para la captura y espera a que suelte el monitor: Windows no deja duplicar dos veces el
-    /// mismo monitor desde el mismo programa, así que la siguiente no puede empezar antes.
-    async fn stop(mut self) {
-        self.forward.abort();
-        if let Some(p) = self.pipeline.take() {
-            let _ = tokio::task::spawn_blocking(move || drop(p)).await;
-        }
-    }
-}
-
-impl Drop for Stream {
-    fn drop(&mut self) {
-        self.forward.abort();
-        if let Some(p) = self.pipeline.take() {
-            // Parar el hilo de captura puede tardar unos milisegundos: fuera del runtime.
-            tokio::task::spawn_blocking(move || drop(p));
-        }
-    }
-}
-
-async fn stop_stream(hub: &mut Hub) {
-    if let Some(s) = hub.stream.take() {
-        s.stop().await;
-    }
-}
-
-/// Lo que se pide a la captura: sale de la pantalla del dispositivo y de los ajustes.
+/// Lo que se pide a la captura: sale de la pantalla del dispositivo y de sus ajustes.
 #[derive(Clone, Debug, PartialEq)]
 struct Request {
     extend: bool,
@@ -145,15 +112,15 @@ struct Request {
 }
 
 impl Request {
-    fn new(c: &Client, p: &Prefs) -> Self {
+    fn new(c: &Client, d: &DevicePrefs) -> Self {
         Self {
-            extend: p.mode == "extend",
-            w: ((c.w as f64 * p.scale) as u32).max(160),
-            h: ((c.h as f64 * p.scale) as u32).max(160),
-            fps: if p.fps == 0 { c.hz.clamp(30, 120) } else { p.fps },
-            bitrate: p.bitrate * 1_000_000,
-            side: p.side.clone(),
-            monitor: p.monitor,
+            extend: d.mode == "extend",
+            w: ((c.w as f64 * d.scale) as u32).max(160),
+            h: ((c.h as f64 * d.scale) as u32).max(160),
+            fps: if d.fps == 0 { c.hz.clamp(30, 120) } else { d.fps },
+            bitrate: d.bitrate * 1_000_000,
+            side: d.side.clone(),
+            monitor: d.monitor,
         }
     }
 }
@@ -172,20 +139,82 @@ struct StreamInfo {
     monitor: String,
 }
 
-/// Monitor virtual conectado para el dispositivo actual.
+/// Monitor virtual de un dispositivo.
 struct Virtual {
     index: u32,
     name: String,
 }
 
-#[derive(Default)]
-struct Hub {
-    viewer: Option<Viewer>,
-    client: Option<Client>,
-    stream: Option<Stream>,
+/// Codificador de un dispositivo dentro de la captura de un monitor.
+struct Stream {
+    /// Monitor (nombre de Windows) de la captura en la que está.
+    output: String,
+    settings: Settings,
+    ctrl: Controller,
+    forward: tokio::task::JoinHandle<()>,
+}
+
+/// Un dispositivo conectado y aceptado.
+struct Session {
+    conn: u64,
+    device: String,
+    tx: mpsc::UnboundedSender<Message>,
+    acked: Arc<AtomicU32>,
+    client: Client,
+    via: &'static str,
     request: Option<Request>,
+    stream: Option<Stream>,
     virt: Option<Virtual>,
     info: Option<StreamInfo>,
+    viewer_stats: Value,
+    host_stats: Arc<StdMutex<Value>>,
+    last_log: Option<Instant>,
+}
+
+impl Session {
+    fn send(&self, v: Value) {
+        let _ = self.tx.send(Message::text(v.to_string()));
+    }
+
+    fn bye(&self, reason: &str, retry: bool) {
+        self.send(json!({"t": "bye", "reason": reason, "retry": retry}));
+        let _ = self.tx.send(Message::Close(None));
+    }
+}
+
+#[derive(Default)]
+struct Hub {
+    sessions: Vec<Session>,
+    /// Capturas en marcha, por monitor (nombre de Windows).
+    captures: HashMap<String, Capture>,
+}
+
+impl Hub {
+    fn index(&self, conn: u64) -> Option<usize> {
+        self.sessions.iter().position(|s| s.conn == conn)
+    }
+
+    fn virtual_names(&self) -> HashSet<String> {
+        self.sessions.iter().filter_map(|s| s.virt.as_ref().map(|v| v.name.clone())).collect()
+    }
+}
+
+/// Saca el codificador de la sesión de su captura; si era el último, para la captura y espera a
+/// que suelte el monitor (Windows no deja duplicar dos veces el mismo monitor desde el mismo
+/// programa, así que la siguiente no puede empezar antes).
+async fn stop_stream(hub: &mut Hub, i: usize) {
+    let Some(st) = hub.sessions[i].stream.take() else { return };
+    st.forward.abort();
+    let conn = hub.sessions[i].conn;
+    let empty = hub.captures.get_mut(&st.output).map(|c| {
+        c.remove(conn);
+        c.is_empty()
+    });
+    if empty == Some(true) {
+        if let Some(cap) = hub.captures.remove(&st.output) {
+            let _ = tokio::task::spawn_blocking(move || drop(cap)).await;
+        }
+    }
 }
 
 fn even(v: u32) -> u32 {
@@ -199,6 +228,31 @@ fn mirror_size(mon: &OutputInfo, req: &Request) -> (u32, u32) {
     ((mw * scale) as u32, (mh * scale) as u32)
 }
 
+/// Posición para un monitor virtual de `w×h` en el lado `side` del principal, por fuera de los
+/// que ya haya en ese lado (para que dos dispositivos a la derecha queden uno tras otro).
+fn stacked_position(main: Rect, (w, h): (u32, u32), side: &str, others: &[Rect]) -> (i32, i32) {
+    let (x, y) = display::side_position(main, (w, h), side);
+    let (w, h) = (w as i32, h as i32);
+    match side {
+        "left" => (others.iter().map(|o| o.x).fold(main.x, i32::min) - w, y),
+        "top" => (x, others.iter().map(|o| o.y).fold(main.y, i32::min) - h),
+        "bottom" => (x, others.iter().map(|o| o.y + o.h).fold(main.y + main.h, i32::max)),
+        _ => (others.iter().map(|o| o.x + o.w).fold(main.x + main.w, i32::max), y),
+    }
+}
+
+/// Un dispositivo esperando a que lo acepten en el panel.
+struct Pending {
+    id: u64,
+    device: String,
+    name: String,
+    ip: IpAddr,
+    screen: String,
+    via: &'static str,
+    since: Instant,
+    reply: Option<oneshot::Sender<bool>>,
+}
+
 pub struct App {
     pub args: Args,
     key: StdMutex<String>,
@@ -210,17 +264,15 @@ pub struct App {
     tls: TlsAcceptor,
     resolver: Arc<CertResolver>,
     hub: Mutex<Hub>,
-    active_viewer: AtomicU64,
+    /// Monitor de cada conexión aceptada, para el táctil (sin bloquear el hub).
+    rects: StdMutex<HashMap<u64, Rect>>,
     next_id: AtomicU64,
     injector: StdMutex<Injector>,
     cert_warned: StdMutex<HashSet<IpAddr>>,
-    last_client_log: StdMutex<Option<Instant>>,
     vdd: StdMutex<Option<Arc<Vdd>>>,
     prefs: StdMutex<Prefs>,
     hotspot: StdMutex<Option<Arc<Hotspot>>>,
     hotspot_error: StdMutex<Option<String>>,
-    viewer_stats: StdMutex<Value>,
-    host_stats: Arc<StdMutex<Value>>,
     /// Encendido desde el panel: solo entonces se aceptan dispositivos y hay red propia.
     on: AtomicBool,
     /// Un encendido o apagado cada vez.
@@ -229,12 +281,25 @@ pub struct App {
     auth_turn: Mutex<()>,
     auth_waiting: AtomicU32,
     rejected: StdMutex<HashSet<IpAddr>>,
+    /// Dispositivos aceptados en el panel desde que se encendió.
+    approved: StdMutex<HashSet<String>>,
+    pending: StdMutex<Vec<Pending>>,
     /// Avisa a los paneles abiertos de que algo ha cambiado.
     changed: Notify,
 }
 
 /// Lo que ve el dispositivo si intenta conectarse con la pantalla apagada.
 const OFF_REASON: &str = "La pantalla está apagada en el ordenador. Enciéndela desde el panel y vuelve a escanear el código QR.";
+
+/// Cómo se llama cada conexión en el panel.
+fn via_name(via: &str) -> &'static str {
+    match via {
+        "own" => "Red propia",
+        "cable" => "Cable USB",
+        "self" => "Este ordenador",
+        _ => "Red del ordenador",
+    }
+}
 
 impl App {
     pub fn new(args: Args, key: String, root: PathBuf, data: PathBuf, certs: CertManager, vdd: Option<Vdd>, prefs: Prefs) -> Result<Arc<Self>> {
@@ -255,22 +320,21 @@ impl App {
             tls: TlsAcceptor::from(Arc::new(config)),
             resolver,
             hub: Mutex::new(Hub::default()),
-            active_viewer: AtomicU64::new(0),
+            rects: StdMutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             injector: StdMutex::new(Injector::new()),
             cert_warned: StdMutex::new(HashSet::new()),
-            last_client_log: StdMutex::new(None),
             vdd: StdMutex::new(vdd.map(Arc::new)),
             prefs: StdMutex::new(prefs),
             hotspot: StdMutex::new(None),
             hotspot_error: StdMutex::new(None),
-            viewer_stats: StdMutex::new(Value::Null),
-            host_stats: Arc::new(StdMutex::new(Value::Null)),
             on: AtomicBool::new(false),
             power_lock: Mutex::new(()),
             auth_turn: Mutex::new(()),
             auth_waiting: AtomicU32::new(0),
             rejected: StdMutex::new(HashSet::new()),
+            approved: StdMutex::new(HashSet::new()),
+            pending: StdMutex::new(Vec::new()),
             changed: Notify::new(),
         }))
     }
@@ -283,14 +347,44 @@ impl App {
         self.on.load(Ordering::SeqCst)
     }
 
+    pub fn prefs(&self) -> Prefs {
+        self.prefs.lock().unwrap().clone()
+    }
+
+    fn save_prefs(&self, p: &Prefs) {
+        p.save(&prefs::path(&self.data));
+    }
+
+    /// Driver del monitor virtual (se reintenta abrir por si se ha instalado con el host en marcha).
+    fn vdd(&self) -> Result<Arc<Vdd>> {
+        let mut slot = self.vdd.lock().unwrap();
+        if let Some(v) = slot.as_ref() {
+            return Ok(v.clone());
+        }
+        let v = Arc::new(Vdd::open()?);
+        *slot = Some(v.clone());
+        Ok(v)
+    }
+
     // -------------------------------------------------------------- seguridad
+
+    /// Por qué conexión llega `peer`: "own" (red propia), "cable", "self" (este ordenador) o
+    /// "local" (la red del ordenador).
+    fn classify(&self, peer: IpAddr, ifs: &[sys::NetIf]) -> &'static str {
+        match peer {
+            _ if peer.is_loopback() => "self",
+            IpAddr::V4(v) if v.octets()[..3] == [192, 168, 137] => "own",
+            IpAddr::V4(v) if sys::cable_interface(ifs).is_some_and(|c| c.same_network(v)) => "cable",
+            _ => "local",
+        }
+    }
 
     /// Quién puede conectarse a este ordenador.
     ///
     /// - Apagada: nadie de fuera (ni siquiera ve las páginas ni el certificado).
-    /// - Red propia: solo los dispositivos unidos a ella, aunque el ordenador siga conectado
-    ///   a otra Wi-Fi (p. ej. la de una cafetería), cuyos equipos quedan fuera.
-    /// - Red del ordenador: cualquiera de esa red; lo protege el código de emparejamiento.
+    /// - Encendida: solo por las conexiones activas. Con la red propia, por ejemplo, entran los
+    ///   dispositivos unidos a ella, pero no los de la Wi-Fi de una cafetería en la que siga el
+    ///   ordenador (salvo que también esté activa «Red del ordenador»).
     fn peer_allowed(&self, peer: IpAddr) -> bool {
         if peer.is_loopback() {
             return true;
@@ -298,10 +392,8 @@ impl App {
         if !self.is_on() {
             return false;
         }
-        if self.prefs().network == "own" {
-            return matches!(peer, IpAddr::V4(v) if v.octets()[..3] == [192, 168, 137]);
-        }
-        true
+        let via = self.classify(peer, &sys::interfaces());
+        self.prefs().has(via)
     }
 
     /// Comprueba el código de emparejamiento contra la fuerza bruta.
@@ -327,23 +419,80 @@ impl App {
         Some(ok)
     }
 
+    /// Espera a que se acepte el dispositivo en el panel. Los ya aceptados desde que se encendió
+    /// no vuelven a preguntar (al reconectar tras un corte o al recargar la página).
+    async fn wait_approval(self: &Arc<Self>, device: &str, client: &Client, via: &'static str, stream: &mut WsStream, tx: &mpsc::UnboundedSender<Message>) -> Option<bool> {
+        if via == "self" || self.approved.lock().unwrap().contains(device) {
+            return Some(true);
+        }
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (reply, rx) = oneshot::channel();
+        self.pending.lock().unwrap().push(Pending {
+            id,
+            device: device.into(),
+            name: client.name.clone(),
+            ip: client.ip,
+            screen: format!("{}x{}", client.w, client.h),
+            via,
+            since: Instant::now(),
+            reply: Some(reply),
+        });
+        log::info!("{} ({}) quiere conectarse por {}: acéptalo en el panel", client.name, client.ip, via_name(via));
+        let _ = tx.send(Message::text(
+            json!({"t": "wait", "message": "Acepta la conexión en el panel del ordenador…"}).to_string(),
+        ));
+        sys::flash_panel_window("XtendedView");
+        self.changed.notify_waiters();
+
+        let deadline = tokio::time::sleep(APPROVAL_TIMEOUT);
+        tokio::pin!(deadline);
+        tokio::pin!(rx);
+        let decision = loop {
+            tokio::select! {
+                r = &mut rx => break Some(r.unwrap_or(false)),
+                _ = &mut deadline => break Some(false),
+                v = next_json(stream) => match v {
+                    Some(v) if v["t"] == "ping" => pong(tx, &v),
+                    Some(_) => {}
+                    None => break None, // el dispositivo se ha ido
+                },
+            }
+        };
+        self.pending.lock().unwrap().retain(|p| p.id != id);
+        self.changed.notify_waiters();
+        decision
+    }
+
+    /// Respuesta del panel a un dispositivo que espera.
+    fn decide(&self, id: u64, accept: bool) -> Result<String> {
+        let mut pending = self.pending.lock().unwrap();
+        let p = pending.iter_mut().find(|p| p.id == id).context("ese dispositivo ya no está esperando")?;
+        if accept {
+            self.approved.lock().unwrap().insert(p.device.clone());
+        }
+        if let Some(r) = p.reply.take() {
+            let _ = r.send(accept);
+        }
+        log::info!("{} {}", p.name, if accept { "aceptado" } else { "rechazado" });
+        Ok(format!("{} {}", p.name, if accept { "aceptado" } else { "rechazado" }))
+    }
+
     // -------------------------------------------------------------- encendido
 
-    /// Enciende (código de emparejamiento nuevo y, si toca, red propia) o apaga (desconecta el
-    /// dispositivo, quita el monitor virtual y cierra la red propia).
+    /// Enciende (código de emparejamiento nuevo y, si toca, red propia) o apaga (desconecta los
+    /// dispositivos, quita los monitores virtuales y cierra la red propia).
     pub async fn power(self: &Arc<Self>, on: bool) -> Result<String> {
         let _one_at_a_time = self.power_lock.lock().await;
         if on == self.is_on() {
             return Ok(if on { "Ya estaba encendida" } else { "Ya estaba apagada" }.into());
         }
         self.rejected.lock().unwrap().clear();
+        self.approved.lock().unwrap().clear();
         if on {
             let key = prefs::pairing_key(&self.data, true)?;
             *self.key.lock().unwrap() = key.clone();
             self.on.store(true, Ordering::SeqCst);
-            if self.prefs().network == "own" {
-                self.set_network(true).await;
-            }
+            self.sync_hotspot().await;
             log::info!("Encendida. Código de emparejamiento: {}", prefs::pretty_key(&key));
             self.print_pairing();
             self.changed.notify_waiters();
@@ -353,55 +502,164 @@ impl App {
                 // Con el hub bloqueado: ningún dispositivo puede colarse entre medias.
                 let mut hub = self.hub.lock().await;
                 self.on.store(false, Ordering::SeqCst);
-                if let Some(v) = &hub.viewer {
-                    let bye = json!({"t": "bye", "reason": "La pantalla se ha apagado desde el ordenador.", "retry": false});
-                    let _ = v.tx.send(Message::text(bye.to_string()));
-                    let _ = v.tx.send(Message::Close(None));
+                for s in &hub.sessions {
+                    s.bye("La pantalla se ha apagado desde el ordenador.", false);
                 }
-                self.clear_viewer(&mut hub).await;
+                while !hub.sessions.is_empty() {
+                    self.remove_session(&mut hub, 0).await;
+                }
             }
-            self.set_network(false).await;
+            for p in self.pending.lock().unwrap().iter_mut() {
+                if let Some(r) = p.reply.take() {
+                    let _ = r.send(false);
+                }
+            }
+            self.sync_hotspot().await;
             log::info!("Apagada");
             self.changed.notify_waiters();
             Ok("Apagada".into())
         }
     }
 
+    /// Antes de encender: la conexión elegida en la pantalla de inicio pasa a ser la única activa.
+    fn choose_connection(&self, connection: &str) {
+        if self.is_on() {
+            return;
+        }
+        let mut p = self.prefs.lock().unwrap();
+        p.connections = vec![connection.to_string()];
+        self.save_prefs(&p);
+    }
+
+    /// Activa o desactiva una conexión (con la pantalla encendida, se crea o cierra la red propia).
+    async fn set_connection(self: &Arc<Self>, connection: &str, enabled: bool) -> Result<String> {
+        {
+            let mut p = self.prefs.lock().unwrap();
+            if !p.set_connection(connection, enabled) {
+                bail!("conexión desconocida");
+            }
+            self.save_prefs(&p);
+        }
+        let _one_at_a_time = self.power_lock.lock().await;
+        self.sync_hotspot().await;
+        if enabled && connection == "own" {
+            if let Some(e) = self.hotspot_error.lock().unwrap().clone() {
+                bail!("no se pudo crear la red propia: {e}");
+            }
+        }
+        if !enabled {
+            // Los dispositivos que entraron por esa conexión se desconectan.
+            let hub = self.hub.lock().await;
+            for s in hub.sessions.iter().filter(|s| s.via == connection) {
+                s.bye("Se ha desactivado esta conexión en el ordenador.", true);
+            }
+        }
+        self.changed.notify_waiters();
+        let name = via_name(connection);
+        Ok(match (enabled, connection) {
+            (true, "cable") if sys::cable_interface(&sys::interfaces()).is_none() => {
+                format!("{name} activado: conecta el móvil y activa «Módem USB»")
+            }
+            (true, _) => format!("{name} activada"),
+            (false, _) => format!("{name} desactivada"),
+        })
+    }
+
+    /// Hace que Windows no salga a internet por el cable (con el anclaje USB, el móvil comparte
+    /// su conexión y gastaría sus datos): se sube la métrica de esa tarjeta para que prefiera la
+    /// Wi-Fi o la red del ordenador. Windows lo recuerda para esa tarjeta; sin otra conexión,
+    /// seguiría usando el móvil. Pide permiso de administrador.
+    async fn fix_cable_route(&self) -> Result<String> {
+        let cable = sys::cable_interface(&sys::interfaces()).cloned().context("no hay ningún cable conectado")?;
+        let params = format!(
+            "-NoProfile -ExecutionPolicy Bypass -Command \"Set-NetIPInterface -InterfaceIndex {} -InterfaceMetric 5000 -ErrorAction Stop\"",
+            cable.index
+        );
+        match tokio::task::spawn_blocking(move || sys::run_elevated("powershell.exe", &params)).await? {
+            Ok(0) => {
+                log::info!("{}: métrica 5000, Windows ya no sale a internet por el cable", cable.name);
+                self.changed.notify_waiters();
+                Ok("Listo: el ordenador seguirá usando su Wi-Fi o su red para internet".into())
+            }
+            Ok(code) => bail!("Windows no ha aceptado el cambio (código {code})"),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Avisa cuando se conecta o se desconecta el cable y, al conectarse, pone su dirección en
+    /// el certificado enseguida (sin esperar a la revisión periódica) para que el dispositivo
+    /// no vea el aviso de seguridad.
+    pub async fn cable_watch(self: Arc<Self>) {
+        let mut last: Option<(String, Ipv4Addr)> = None;
+        loop {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            let now = if self.is_on() && self.prefs().has("cable") {
+                tokio::task::spawn_blocking(|| {
+                    let ifs = sys::interfaces();
+                    sys::cable_interface(&ifs).and_then(|c| c.ipv4.first().map(|(ip, _)| (c.name.clone(), *ip)))
+                })
+                .await
+                .ok()
+                .flatten()
+            } else {
+                None
+            };
+            if now == last {
+                continue;
+            }
+            match (&now, &last) {
+                (Some((name, ip)), _) => {
+                    log::info!("Cable conectado: {name} ({ip})");
+                    self.refresh_cert();
+                    self.print_pairing();
+                }
+                (None, Some((name, _))) => log::info!("Cable desconectado ({name})"),
+                (None, None) => {}
+            }
+            last = now;
+            self.changed.notify_waiters();
+        }
+    }
+
+    /// Reemite el certificado del servidor si hay direcciones nuevas.
+    fn refresh_cert(&self) {
+        match self.certs.ensure().and_then(|changed| {
+            if changed {
+                *self.resolver.0.write().unwrap() = certified_key(&self.certs)?;
+            }
+            Ok(changed)
+        }) {
+            Ok(true) => log::info!("Certificado actualizado. Direcciones: {:?}", certs::usable_ips()),
+            Ok(false) => {}
+            Err(e) => log::warn!("No se pudo actualizar el certificado: {e:#}"),
+        }
+    }
+
     /// Dirección y código QR en la consola, para quien no tenga el panel delante.
     fn print_pairing(&self) {
-        match self.viewer_url() {
-            Some(url) => {
-                println!("\n En el dispositivo, escanea este código o abre {url}");
+        let mut any = false;
+        for c in self.prefs().connections {
+            if let Some(url) = self.viewer_url(&c) {
+                any = true;
+                println!("\n {}: en el dispositivo, escanea este código o abre {url}", via_name(&c));
                 if let Ok(qr) = sys::qr_text(&url) {
                     for l in qr.lines() {
                         println!("   {l}");
                     }
                 }
             }
-            None => println!("\n Sin red disponible todavía: el panel mostrará el código QR cuando la haya."),
         }
-    }
-
-    pub fn prefs(&self) -> Prefs {
-        self.prefs.lock().unwrap().clone()
-    }
-
-    /// Driver del monitor virtual (se reintenta abrir por si se ha instalado con el host en marcha).
-    fn vdd(&self) -> Result<Arc<Vdd>> {
-        let mut slot = self.vdd.lock().unwrap();
-        if let Some(v) = slot.as_ref() {
-            return Ok(v.clone());
+        if !any {
+            println!("\n Sin conexión disponible todavía: el panel mostrará el código QR cuando la haya.");
         }
-        let v = Arc::new(Vdd::open()?);
-        *slot = Some(v.clone());
-        Ok(v)
     }
 
     // -------------------------------------------------------------- red
 
-    /// Activa o desactiva la red Wi-Fi propia.
-    pub async fn set_network(self: &Arc<Self>, own: bool) {
-        if !own {
+    /// Crea la red Wi-Fi propia si está activa y la pantalla encendida; si no, la cierra.
+    async fn sync_hotspot(self: &Arc<Self>) {
+        let want = self.is_on() && self.prefs().has("own");
+        if !want {
             if self.hotspot.lock().unwrap().take().is_some() {
                 log::info!("Red Wi-Fi propia cerrada");
             }
@@ -454,29 +712,36 @@ impl App {
         }
     }
 
-    /// IP a la que debe conectarse el dispositivo según la red elegida.
-    fn device_ip(&self) -> Option<Ipv4Addr> {
-        if self.prefs().network == "own" {
-            let ok = self.hotspot.lock().unwrap().is_some();
-            return ok.then(|| {
-                certs::local_ipv4s()
-                    .into_iter()
-                    .find(|ip| ip.octets()[..3] == [192, 168, 137])
-                    .unwrap_or(Ipv4Addr::new(192, 168, 137, 1))
-            });
+    /// IP del ordenador en una conexión (la que tiene que abrir el dispositivo).
+    fn connection_ip(&self, connection: &str) -> Option<Ipv4Addr> {
+        match connection {
+            "own" => {
+                let ok = self.hotspot.lock().unwrap().is_some();
+                ok.then(|| {
+                    certs::local_ipv4s()
+                        .into_iter()
+                        .find(|ip| ip.octets()[..3] == [192, 168, 137])
+                        .unwrap_or(Ipv4Addr::new(192, 168, 137, 1))
+                })
+            }
+            "cable" => sys::cable_interface(&sys::interfaces()).and_then(|c| c.ipv4.first().map(|(ip, _)| *ip)),
+            _ => sys::lan_ip(),
         }
-        sys::lan_ip()
     }
 
-    fn viewer_url(&self) -> Option<String> {
-        if !self.is_on() {
+    fn viewer_url(&self, connection: &str) -> Option<String> {
+        if !self.is_on() || !self.prefs().has(connection) {
             return None;
         }
-        self.device_ip().map(|ip| format!("https://{ip}:{}/#k={}", self.args.port, self.key()))
+        self.connection_ip(connection).map(|ip| format!("https://{ip}:{}/#k={}", self.args.port, self.key()))
     }
 
     fn setup_url(&self) -> Option<String> {
-        self.device_ip().map(|ip| format!("http://{ip}:{}/setup", self.args.http_port))
+        let p = self.prefs();
+        p.connections
+            .iter()
+            .find_map(|c| self.connection_ip(c))
+            .map(|ip| format!("http://{ip}:{}/setup", self.args.http_port))
     }
 
     fn wifi_qr(&self) -> Option<String> {
@@ -486,16 +751,24 @@ impl App {
 
     // -------------------------------------------------------------- pantalla
 
-    /// Crea (si hace falta) el monitor virtual, le pone el modo que mejor encaja con el
-    /// dispositivo y lo coloca en el lado elegido.
-    async fn prepare_virtual(&self, hub: &mut Hub, req: &Request) -> Result<(OutputInfo, Target, bool)> {
+    /// Crea (si hace falta) el monitor virtual de la sesión, le pone el modo que mejor encaja con
+    /// el dispositivo y lo coloca en su lado (por fuera de los de otros dispositivos en ese lado).
+    async fn prepare_virtual(&self, hub: &mut Hub, i: usize, req: &Request) -> Result<(OutputInfo, Target, bool)> {
         let vdd = self.vdd()?;
-        if hub.virt.is_none() {
+        if hub.sessions[i].virt.is_none() {
             let (index, out) = tokio::task::spawn_blocking(move || display::create_virtual(&vdd)).await??;
             log::info!("Monitor virtual conectado: {} (índice {index} en Parsec VDD)", out.name);
-            hub.virt = Some(Virtual { index, name: out.name });
+            hub.sessions[i].virt = Some(Virtual { index, name: out.name });
         }
-        let name = hub.virt.as_ref().map(|v| v.name.clone()).unwrap_or_default();
+        let name = hub.sessions[i].virt.as_ref().map(|v| v.name.clone()).unwrap_or_default();
+        // Otros monitores virtuales en el mismo lado.
+        let same_side: HashSet<String> = hub
+            .sessions
+            .iter()
+            .enumerate()
+            .filter(|(j, s)| *j != i && s.request.as_ref().is_some_and(|r| r.extend && r.side == req.side))
+            .filter_map(|(_, s)| s.virt.as_ref().map(|v| v.name.clone()))
+            .collect();
         let (w, h, fps, side) = (req.w, req.h, req.fps, req.side.clone());
         tokio::task::spawn_blocking(move || -> Result<(OutputInfo, Target, bool)> {
             let (target, exact) =
@@ -505,9 +778,11 @@ impl App {
                 display::apply(&name, target)?;
             }
             let dims = target.desktop();
+            let outputs = capture::outputs()?;
             // El monitor principal es el que está en el origen del escritorio.
-            let main = capture::outputs()?.into_iter().find(|o| o.name != name && o.rect.x == 0 && o.rect.y == 0);
-            let at = main.map(|m| display::side_position(m.rect, dims, &side));
+            let main = outputs.iter().find(|o| o.name != name && o.rect.x == 0 && o.rect.y == 0);
+            let others: Vec<Rect> = outputs.iter().filter(|o| same_side.contains(&o.name)).map(|o| o.rect).collect();
+            let at = main.map(|m| stacked_position(m.rect, dims, &side, &others));
             if let Some(p) = at {
                 if display::position(&name) != Some(p) {
                     display::place(&name, p)?;
@@ -524,9 +799,9 @@ impl App {
         .await?
     }
 
-    async fn remove_virtual(&self, hub: &mut Hub) {
-        if let Some(v) = hub.virt.take() {
-            stop_stream(hub).await; // primero se deja de capturar ese monitor
+    async fn remove_virtual(&self, hub: &mut Hub, i: usize) {
+        if let Some(v) = hub.sessions[i].virt.take() {
+            stop_stream(hub, i).await; // primero se deja de capturar ese monitor
             if let Ok(vdd) = self.vdd() {
                 let index = v.index;
                 let _ = tokio::task::spawn_blocking(move || vdd.remove(index)).await;
@@ -535,43 +810,40 @@ impl App {
         }
     }
 
-    fn mirror_monitor(&self, index: usize, hub: &Hub) -> Result<OutputInfo> {
-        let virt = hub.virt.as_ref().map(|v| v.name.clone());
-        let outputs: Vec<OutputInfo> = capture::outputs()?.into_iter().filter(|o| Some(&o.name) != virt.as_ref()).collect();
-        let n = outputs.len();
-        outputs.into_iter().nth(index.min(n.saturating_sub(1))).context("no hay monitores")
+    /// Monitores reales (sin los virtuales de los dispositivos): los que se pueden duplicar.
+    fn real_monitors(&self, hub: &Hub) -> Vec<OutputInfo> {
+        let virt = hub.virtual_names();
+        capture::outputs().unwrap_or_default().into_iter().filter(|o| !virt.contains(&o.name)).collect()
     }
 
-    fn send_viewer_settings(&self, hub: &Hub) {
-        if let Some(v) = &hub.viewer {
-            let p = self.prefs();
-            let msg = json!({"t": "settings", "stats": p.stats, "measure": p.measure, "fullscreen": p.fullscreen});
-            let _ = v.tx.send(Message::text(msg.to_string()));
-        }
+    fn send_viewer_settings(&self, s: &Session) {
+        let p = self.prefs();
+        let d = p.device(&s.device);
+        s.send(json!({"t": "settings", "stats": d.stats, "measure": p.measure, "fullscreen": d.fullscreen}));
     }
 
-    /// Ajusta la captura al dispositivo conectado y a los ajustes actuales.
-    async fn apply(self: &Arc<Self>, hub: &mut Hub) -> Result<()> {
-        let (Some(viewer), Some(client)) = (hub.viewer.as_ref(), hub.client.as_ref()) else { return Ok(()) };
-        let (tx, acked) = (viewer.tx.clone(), viewer.acked.clone());
-        let req = Request::new(client, &self.prefs());
-        if hub.stream.is_some() {
-            if hub.request.as_ref() == Some(&req) {
+    /// Ajusta la captura de una sesión a su dispositivo y a sus ajustes.
+    async fn apply(self: &Arc<Self>, hub: &mut Hub, i: usize) -> Result<()> {
+        let d = self.prefs().device(&hub.sessions[i].device);
+        let req = Request::new(&hub.sessions[i].client, &d);
+        let s = &mut hub.sessions[i];
+        if let Some(st) = s.stream.as_mut() {
+            if s.request.as_ref() == Some(&req) {
                 return Ok(()); // nada que cambiar
             }
-            let prev = hub.request.clone();
-            if let (Some(prev), Some(st)) = (prev, hub.stream.as_mut()) {
+            if let Some(prev) = s.request.clone() {
                 if (Request { bitrate: req.bitrate, ..prev }) == req {
                     st.ctrl.bitrate(req.bitrate); // solo cambia la calidad: sin reiniciar
                     st.settings.bitrate = req.bitrate;
-                    log::info!("Calidad cambiada a {} Mbps", req.bitrate / 1_000_000);
-                    hub.request = Some(req);
+                    log::info!("{}: calidad {} Mbps", s.client.name, req.bitrate / 1_000_000);
+                    s.request = Some(req);
                     return Ok(());
                 }
             }
         }
 
-        stop_stream(hub).await; // se para la captura anterior antes de tocar los monitores
+        stop_stream(hub, i).await; // se para su captura antes de tocar los monitores
+        let tx = hub.sessions[i].tx.clone();
         let info = |msg: &str| {
             let _ = tx.send(Message::text(json!({"t": "info", "message": msg}).to_string()));
         };
@@ -580,7 +852,7 @@ impl App {
         let mut register = None;
         let (mut exact, mut portrait) = (true, false);
         if extend {
-            match self.prepare_virtual(hub, &req).await {
+            match self.prepare_virtual(hub, i, &req).await {
                 Ok((out, t, ok)) => {
                     let (dw, dh) = t.desktop();
                     if !ok {
@@ -598,28 +870,32 @@ impl App {
                     log::warn!("{msg}");
                     info(&msg);
                     extend = false;
-                    self.remove_virtual(hub).await;
+                    self.remove_virtual(hub, i).await;
                 }
             }
         } else {
-            self.remove_virtual(hub).await;
+            self.remove_virtual(hub, i).await;
         }
         let (mon, width, height, fps) = match target {
             Some(t) => t,
             None => {
-                let mon = self.mirror_monitor(req.monitor, hub)?;
+                let monitors = self.real_monitors(hub);
+                let n = monitors.len();
+                let mon = monitors.into_iter().nth(req.monitor.min(n.saturating_sub(1))).context("no hay monitores")?;
                 let (w, h) = mirror_size(&mon, &req);
                 (mon, w, h, req.fps)
             }
         };
         let settings = Settings { monitor: mon.index, width: even(width), height: even(height), fps, bitrate: req.bitrate };
-        self.injector.lock().unwrap().monitor = Some(mon.rect);
+        let s = &mut hub.sessions[i];
+        self.rects.lock().unwrap().insert(s.conn, mon.rect);
         log::info!(
-            "{} {}x{} a {} fps, {} Mbps desde {} ({}x{})",
-            if extend { "Pantalla adicional:" } else { "Espejo:" },
+            "{}: {} {}x{} a {} fps, {} Mbps desde {} ({}x{})",
+            s.client.name,
+            if extend { "pantalla adicional" } else { "espejo" },
             settings.width, settings.height, settings.fps, settings.bitrate / 1_000_000, mon.name, mon.rect.w, mon.rect.h
         );
-        hub.info = Some(StreamInfo {
+        s.info = Some(StreamInfo {
             extend,
             width: settings.width,
             height: settings.height,
@@ -629,151 +905,215 @@ impl App {
             register,
             monitor: mon.name.clone(),
         });
-        hub.request = Some(req);
+        s.request = Some(req);
+        let (conn, acked, host_stats, name) = (s.conn, s.acked.clone(), s.host_stats.clone(), s.client.name.clone());
+        let capture = hub.captures.entry(mon.name.clone()).or_insert_with(|| Capture::start(mon.index));
         let (ev_tx, ev_rx) = mpsc::unbounded_channel();
-        let pipeline = Pipeline::start(settings.clone(), ev_tx);
+        let ctrl = capture.add(conn, settings.clone(), ev_tx);
         let forward = tokio::spawn(forward(
             ev_rx,
             tx,
             acked,
-            pipeline.controller(),
+            ctrl.clone(),
             settings.clone(),
             extend,
             self.args.max_inflight_ms,
-            self.host_stats.clone(),
+            host_stats,
+            name,
         ));
-        let ctrl = pipeline.controller();
-        hub.stream = Some(Stream { settings, ctrl, pipeline: Some(pipeline), forward });
-        self.send_viewer_settings(hub);
+        let s = &mut hub.sessions[i];
+        s.stream = Some(Stream { output: mon.name, settings, ctrl, forward });
+        self.send_viewer_settings(s);
         self.changed.notify_waiters();
         Ok(())
     }
 
-    async fn reconfigure(self: &Arc<Self>) {
+    /// Vuelve a aplicar los ajustes de un dispositivo, si está conectado.
+    async fn reconfigure_device(self: &Arc<Self>, device: &str) {
         let mut hub = self.hub.lock().await;
-        if let Err(e) = self.apply(&mut hub).await {
-            log::error!("No se pudo aplicar el cambio: {e:#}");
+        if let Some(i) = hub.sessions.iter().position(|s| s.device == device) {
+            if let Err(e) = self.apply(&mut hub, i).await {
+                log::error!("No se pudo aplicar el cambio: {e:#}");
+            }
         }
     }
 
-    async fn attach(self: &Arc<Self>, id: u64, tx: &mpsc::UnboundedSender<Message>, acked: &Arc<AtomicU32>, hello: &Value, ip: IpAddr) -> Result<()> {
+    /// Da de alta (o actualiza, si solo ha girado o plegado la pantalla) la sesión de una conexión.
+    #[allow(clippy::too_many_arguments)]
+    async fn attach(
+        self: &Arc<Self>,
+        conn: u64,
+        device: &str,
+        via: &'static str,
+        tx: &mpsc::UnboundedSender<Message>,
+        acked: &Arc<AtomicU32>,
+        hello: &Value,
+        ip: IpAddr,
+    ) -> Result<()> {
         let mut hub = self.hub.lock().await;
         if !self.is_on() {
             bail!("apagada"); // se ha apagado mientras el dispositivo se conectaba
         }
-        if let Some(old) = hub.viewer.as_ref().filter(|v| v.id != id) {
-            let bye = json!({"t": "bye", "reason": "Otro dispositivo se ha conectado como pantalla."});
-            let _ = old.tx.send(Message::text(bye.to_string()));
-            let _ = old.tx.send(Message::Close(None));
-            stop_stream(&mut hub).await;
-            hub.request = None;
-        }
-        let same = hub.viewer.as_ref().is_some_and(|v| v.id == id);
         let mut client = Client::parse(hello, ip);
-        if let (true, Some(prev)) = (same, hub.client.as_ref()) {
-            client.since = prev.since; // mismo dispositivo que solo ha girado o plegado la pantalla
-        } else {
-            log::info!("Dispositivo: {} ({ip}), pantalla {}x{} a {} Hz", client.name, client.w, client.h, client.hz);
+        if let Some(i) = hub.index(conn) {
+            client.since = hub.sessions[i].client.since; // solo ha girado o plegado la pantalla
+            hub.sessions[i].client = client;
+            return self.apply(&mut hub, i).await;
         }
-        hub.viewer = Some(Viewer { id, tx: tx.clone(), acked: acked.clone() });
-        hub.client = Some(client);
-        self.active_viewer.store(id, Ordering::Relaxed);
-        self.apply(&mut hub).await
+        // El mismo dispositivo con otra conexión (recargó la página, se cortó la red…): la nueva
+        // sustituye a la antigua y se queda con su monitor virtual.
+        let mut inherited = None;
+        if let Some(j) = hub.sessions.iter().position(|s| s.device == device) {
+            stop_stream(&mut hub, j).await;
+            let old = hub.sessions.remove(j);
+            old.bye("Este dispositivo se ha vuelto a conectar.", false);
+            self.injector.lock().unwrap().release(old.conn);
+            self.rects.lock().unwrap().remove(&old.conn);
+            inherited = old.virt;
+        } else if hub.sessions.len() >= MAX_DEVICES {
+            bail!("ya hay {MAX_DEVICES} dispositivos conectados");
+        }
+        // Un dispositivo nuevo va a un lado libre, para no tapar a los demás.
+        let used: Vec<String> = hub
+            .sessions
+            .iter()
+            .filter_map(|s| s.request.as_ref().filter(|r| r.extend).map(|r| r.side.clone()))
+            .collect();
+        let free = ["right", "left", "top", "bottom"].into_iter().find(|s| !used.iter().any(|u| u == s));
+        {
+            let mut p = self.prefs.lock().unwrap();
+            p.remember_device(device, &client.name, free);
+            self.save_prefs(&p);
+        }
+        log::info!("Dispositivo: {} ({ip}, {}), pantalla {}x{} a {} Hz", client.name, via_name(via), client.w, client.h, client.hz);
+        hub.sessions.push(Session {
+            conn,
+            device: device.into(),
+            tx: tx.clone(),
+            acked: acked.clone(),
+            client,
+            via,
+            request: None,
+            stream: None,
+            virt: inherited,
+            info: None,
+            viewer_stats: Value::Null,
+            host_stats: Arc::new(StdMutex::new(Value::Null)),
+            last_log: None,
+        });
+        let i = hub.sessions.len() - 1;
+        self.changed.notify_waiters();
+        self.apply(&mut hub, i).await
     }
 
-    async fn detach(&self, id: u64) {
+    async fn detach(&self, conn: u64) {
         let mut hub = self.hub.lock().await;
-        if hub.viewer.as_ref().map(|v| v.id) == Some(id) {
-            self.clear_viewer(&mut hub).await;
+        if let Some(i) = hub.index(conn) {
+            self.remove_session(&mut hub, i).await;
         }
     }
 
-    /// Olvida el dispositivo: deja de capturar, suelta el táctil y quita el monitor virtual.
-    async fn clear_viewer(&self, hub: &mut Hub) {
-        hub.viewer = None;
-        hub.client = None;
-        stop_stream(hub).await;
-        hub.request = None;
-        hub.info = None;
-        self.injector.lock().unwrap().release_all();
-        self.remove_virtual(hub).await;
-        self.active_viewer.store(0, Ordering::Relaxed);
-        *self.viewer_stats.lock().unwrap() = Value::Null;
-        *self.host_stats.lock().unwrap() = Value::Null;
+    /// Olvida un dispositivo: deja de capturar, suelta su táctil y quita su monitor virtual.
+    async fn remove_session(&self, hub: &mut Hub, i: usize) {
+        stop_stream(hub, i).await;
+        self.remove_virtual(hub, i).await;
+        let s = hub.sessions.remove(i);
+        self.injector.lock().unwrap().release(s.conn);
+        self.rects.lock().unwrap().remove(&s.conn);
+        log::info!("{} desconectado", s.client.name);
         self.changed.notify_waiters();
     }
 
-    fn client_stats(&self, m: &Value) {
-        *self.viewer_stats.lock().unwrap() = m.clone();
-        let mut last = self.last_client_log.lock().unwrap();
-        if last.is_some_and(|t| t.elapsed() < Duration::from_secs(5)) {
+    async fn client_stats(&self, conn: u64, m: &Value) {
+        let mut hub = self.hub.lock().await;
+        let Some(i) = hub.index(conn) else { return };
+        let s = &mut hub.sessions[i];
+        s.viewer_stats = m.clone();
+        if s.last_log.is_some_and(|t| t.elapsed() < Duration::from_secs(5)) {
             return;
         }
-        *last = Some(Instant::now());
+        s.last_log = Some(Instant::now());
         let f = |k: &str| m[k].as_f64().unwrap_or(0.0);
         let total = if f("e2e") > 0.0 { format!(", total {:.0} ms (p95 {:.0})", f("e2e"), f("e2e95")) } else { String::new() };
         log::info!(
-            "Dispositivo: {:.0} fps, {:.1} Mbps, red {:.1} ms, decodificación {:.1} ms, RTT {:.1} ms{total}",
-            f("fps"), f("mbps"), f("net"), f("dec"), f("rtt")
+            "{}: {:.0} fps, {:.1} Mbps, red {:.1} ms, decodificación {:.1} ms, RTT {:.1} ms{total}",
+            s.client.name, f("fps"), f("mbps"), f("net"), f("dec"), f("rtt")
         );
     }
 
     // -------------------------------------------------------------- panel
 
-    /// Aplica un ajuste elegido en el panel. Devuelve un mensaje si hay algo que contar.
-    async fn set_pref(self: &Arc<Self>, key: &str, value: &Value) -> Result<Option<String>> {
-        let ok = {
-            let mut p = self.prefs.lock().unwrap();
-            let ok = p.set(key, value);
-            if ok {
-                p.save(&prefs::path(&self.data));
-            }
-            ok
-        };
-        if !ok {
-            bail!("valor no válido para «{key}»");
+    /// Ajuste general (de momento, medir la latencia en todos los dispositivos).
+    async fn set_pref(self: &Arc<Self>, key: &str, value: &Value) -> Result<()> {
+        if key != "measure" {
+            bail!("ajuste desconocido «{key}»");
         }
-        let mut message = None;
-        match key {
-            "network" => {
-                let own = self.prefs().network == "own";
-                let _one_at_a_time = self.power_lock.lock().await;
-                // Mientras está apagada solo se guarda: la red propia se crea al encender.
-                if self.is_on() {
-                    self.set_network(own).await;
-                    if let Some(e) = self.hotspot_error.lock().unwrap().clone().filter(|_| own) {
-                        bail!("no se pudo crear la red propia: {e}");
-                    }
-                }
-                message = Some(match (own, self.is_on()) {
-                    (true, true) => "Red propia activa",
-                    (false, true) => "Usando la red del ordenador",
-                    (true, false) => "Al encender se creará la red propia",
-                    (false, false) => "Al encender se usará la red del ordenador",
-                }.to_string());
-            }
-            "stats" | "measure" | "fullscreen" => {
-                let hub = self.hub.lock().await;
-                self.send_viewer_settings(&hub);
-            }
-            _ => self.reconfigure().await,
+        {
+            let mut p = self.prefs.lock().unwrap();
+            p.measure = value.as_bool().unwrap_or(p.measure);
+            self.save_prefs(&p);
+        }
+        let hub = self.hub.lock().await;
+        for s in &hub.sessions {
+            self.send_viewer_settings(s);
         }
         self.changed.notify_waiters();
-        Ok(message)
+        Ok(())
+    }
+
+    /// Ajuste de un dispositivo.
+    async fn set_device(self: &Arc<Self>, device: &str, key: &str, value: &Value) -> Result<()> {
+        {
+            let mut p = self.prefs.lock().unwrap();
+            if !p.set_device(device, key, value) {
+                bail!("valor no válido para «{key}»");
+            }
+            self.save_prefs(&p);
+        }
+        match key {
+            "stats" | "fullscreen" => {
+                let hub = self.hub.lock().await;
+                if let Some(s) = hub.sessions.iter().find(|s| s.device == device) {
+                    self.send_viewer_settings(s);
+                }
+            }
+            _ => self.reconfigure_device(device).await,
+        }
+        self.changed.notify_waiters();
+        Ok(())
     }
 
     /// Acciones del panel. Devuelve un mensaje para mostrar.
-    async fn action(self: &Arc<Self>, name: &str) -> Result<String> {
+    async fn action(self: &Arc<Self>, name: &str, device: &str) -> Result<String> {
         match name {
+            // Encender eligiendo la conexión en la pantalla de inicio ("powerOn" usa las guardadas).
             "powerOn" => self.power(true).await,
+            "powerOnLocal" | "powerOnOwn" | "powerOnCable" => {
+                let connection = match name {
+                    "powerOnOwn" => "own",
+                    "powerOnCable" => "cable",
+                    _ => "local",
+                };
+                self.choose_connection(connection);
+                self.power(true).await?;
+                Ok(match connection {
+                    "cable" if sys::cable_interface(&sys::interfaces()).is_none() => {
+                        "Encendida: conecta el móvil con el cable USB y activa «Módem USB»"
+                    }
+                    "cable" => "Encendida por cable: escanea el código QR con el móvil",
+                    "own" if self.hotspot_error.lock().unwrap().is_some() => "Encendida, pero no se pudo crear la red propia",
+                    "own" => "Encendida con red propia: escanea los dos códigos QR",
+                    _ => "Encendida: escanea el código QR con el dispositivo",
+                }
+                .into())
+            }
             "powerOff" => self.power(false).await,
+            "fixCableRoute" => self.fix_cable_route().await,
             "disconnect" => {
                 let hub = self.hub.lock().await;
-                let Some(v) = &hub.viewer else { bail!("no hay ningún dispositivo conectado") };
-                let bye = json!({"t": "bye", "reason": "Desconectado desde el ordenador."});
-                let _ = v.tx.send(Message::text(bye.to_string()));
-                let _ = v.tx.send(Message::Close(None));
-                Ok("Dispositivo desconectado".into())
+                let s = hub.sessions.iter().find(|s| s.device == device).context("ese dispositivo no está conectado")?;
+                s.bye("Desconectado desde el ordenador.", true);
+                Ok(format!("{} desconectado", s.client.name))
             }
             "newCode" => {
                 if !self.is_on() {
@@ -781,11 +1121,10 @@ impl App {
                 }
                 let key = prefs::pairing_key(&self.data, true)?;
                 *self.key.lock().unwrap() = key.clone();
+                self.approved.lock().unwrap().clear();
                 let hub = self.hub.lock().await;
-                if let Some(v) = &hub.viewer {
-                    let bye = json!({"t": "bye", "reason": "El código ha cambiado: vuelve a escanear el QR."});
-                    let _ = v.tx.send(Message::text(bye.to_string()));
-                    let _ = v.tx.send(Message::Close(None));
+                for s in &hub.sessions {
+                    s.bye("El código ha cambiado: vuelve a escanear el QR.", false);
                 }
                 log::info!("Código de emparejamiento nuevo: {}", prefs::pretty_key(&key));
                 Ok(format!("Código nuevo: {}", prefs::pretty_key(&key)))
@@ -794,30 +1133,46 @@ impl App {
                 sys::open_url(&format!("http://localhost:{}/probe", self.args.http_port));
                 Ok("Sonda abierta: déjala visible en la pantalla que se envía al dispositivo".into())
             }
-            "registerResolution" => self.register_resolution().await,
+            "registerResolution" => self.register_resolution(device).await,
             _ => bail!("acción desconocida"),
         }
     }
 
-    /// Registra la resolución exacta del dispositivo en el driver (pide permiso de administrador).
-    async fn register_resolution(self: &Arc<Self>) -> Result<String> {
+    /// Registra la resolución exacta de un dispositivo en el driver (pide permiso de
+    /// administrador). El script reinicia el adaptador virtual, así que se quitan antes todos los
+    /// monitores virtuales y luego se vuelven a crear.
+    async fn register_resolution(self: &Arc<Self>, device: &str) -> Result<String> {
         let spec = {
             let hub = self.hub.lock().await;
-            hub.info.as_ref().and_then(|i| i.register.clone()).context("la resolución ya es exacta")?
+            hub.sessions
+                .iter()
+                .find(|s| s.device == device)
+                .and_then(|s| s.info.as_ref().and_then(|i| i.register.clone()))
+                .context("la resolución ya es exacta")?
         };
         let script = self.root.join("tools").join("vdd-resoluciones.ps1");
         let params = format!("-NoProfile -ExecutionPolicy Bypass -File \"{}\" -Add {spec}", script.display());
         {
-            // El script reinicia el adaptador virtual: antes se deja de capturar y se quita el monitor.
             let mut hub = self.hub.lock().await;
-            stop_stream(&mut hub).await;
-            self.remove_virtual(&mut hub).await;
+            for i in 0..hub.sessions.len() {
+                if hub.sessions[i].virt.is_some() {
+                    self.remove_virtual(&mut hub, i).await;
+                    hub.sessions[i].request = None;
+                }
+            }
         }
         let result = tokio::task::spawn_blocking(move || sys::run_elevated("powershell.exe", &params)).await?;
         // Tras reiniciar el adaptador hay que volver a abrir el driver.
         *self.vdd.lock().unwrap() = None;
         tokio::time::sleep(Duration::from_secs(2)).await;
-        self.reconfigure().await;
+        {
+            let mut hub = self.hub.lock().await;
+            for i in 0..hub.sessions.len() {
+                if let Err(e) = self.apply(&mut hub, i).await {
+                    log::error!("No se pudo volver a aplicar: {e:#}");
+                }
+            }
+        }
         match result {
             Ok(0) => Ok(format!("Resolución {spec} registrada")),
             Ok(code) => bail!("el script terminó con el código {code} (¿ya hay 5 resoluciones registradas?)"),
@@ -830,71 +1185,100 @@ impl App {
         let p = self.prefs();
         let on = self.is_on();
         let hotspot = self.hotspot.lock().unwrap().clone();
-        let ip = self.device_ip();
         let ifs = sys::interfaces();
-        let link = ip.and_then(|ip| sys::interface_of(&ifs, ip)).map(|i| json!({"name": i.name, "wifi": i.wifi}));
-        let net = json!({
-            "kind": p.network,
-            "ready": on && ip.is_some(),
-            "ip": ip.map(|i| i.to_string()),
-            "url": self.viewer_url(),
-            "setupUrl": self.setup_url(),
-            "ssid": hotspot.as_ref().map(|h| h.ssid.clone()),
-            "password": hotspot.as_ref().map(|h| h.password.clone()),
-            "error": self.hotspot_error.lock().unwrap().clone(),
-            "otherWifi": sys::on_other_wifi(&ifs),
-            "link": link,
+        let cable_if = sys::cable_interface(&ifs);
+        let route = cable_if.map(|c| match sys::cable_route(&ifs, c) {
+            sys::CableRoute::Fine => "fine",
+            sys::CableRoute::PreferredOverOther => "preferred",
+            sys::CableRoute::OnlyRoute => "only",
         });
+        let conn_state = |c: &str| {
+            let ip = self.connection_ip(c);
+            json!({
+                "enabled": p.has(c),
+                "ready": on && p.has(c) && ip.is_some(),
+                "ip": ip.map(|i| i.to_string()),
+                "url": self.viewer_url(c),
+            })
+        };
+        let mut local = conn_state("local");
+        let lan = sys::lan_ip();
+        local["link"] = json!(lan.and_then(|ip| sys::interface_of(&ifs, ip)).map(|i| json!({"name": i.name, "wifi": i.wifi})));
+        let mut own = conn_state("own");
+        own["ssid"] = json!(hotspot.as_ref().map(|h| h.ssid.clone()));
+        own["password"] = json!(hotspot.as_ref().map(|h| h.password.clone()));
+        own["error"] = json!(self.hotspot_error.lock().unwrap().clone());
+        own["otherWifi"] = json!(sys::on_other_wifi(&ifs));
+        let mut cable = conn_state("cable");
+        cable["detected"] = json!(cable_if.map(|c| json!({"name": c.name, "route": route})));
         let vdd = match self.vdd.lock().unwrap().as_ref() {
             Some(v) => json!({"available": true, "version": v.version}),
             None => json!({"available": false}),
         };
+        let pending: Vec<Value> = self
+            .pending
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|q| {
+                json!({
+                    "id": q.id, "device": q.device, "name": q.name, "ip": q.ip.to_string(), "screen": q.screen,
+                    "via": via_name(q.via), "waiting": q.since.elapsed().as_secs(),
+                    "left": APPROVAL_TIMEOUT.as_secs().saturating_sub(q.since.elapsed().as_secs()),
+                })
+            })
+            .collect();
         let hub = self.hub.lock().await;
-        let device = hub.client.as_ref().map(|c| {
-            json!({
-                "name": c.name, "ip": c.ip.to_string(), "screen": format!("{}x{}", c.w, c.h),
-                "hz": c.hz, "since": c.since.elapsed().as_secs(),
+        let devices: Vec<Value> = hub
+            .sessions
+            .iter()
+            .map(|s| {
+                let c = &s.client;
+                json!({
+                    "device": s.device,
+                    "name": c.name, "ip": c.ip.to_string(), "screen": format!("{}x{}", c.w, c.h),
+                    "hz": c.hz, "since": c.since.elapsed().as_secs(), "via": via_name(s.via),
+                    "prefs": p.device(&s.device),
+                    "stream": s.info.as_ref().map(|i| json!({
+                        "extend": i.extend, "width": i.width, "height": i.height, "fps": i.fps,
+                        "portrait": i.portrait, "exact": i.exact, "register": i.register, "monitor": i.monitor,
+                    })),
+                    "viewerStats": s.viewer_stats,
+                    "hostStats": s.host_stats.lock().unwrap().clone(),
+                })
             })
-        });
-        let stream = hub.info.as_ref().map(|i| {
-            json!({
-                "extend": i.extend, "width": i.width, "height": i.height, "fps": i.fps,
-                "portrait": i.portrait, "exact": i.exact, "register": i.register, "monitor": i.monitor,
-            })
-        });
-        let virt = hub.virt.as_ref().map(|v| v.name.clone());
-        drop(hub);
-        let monitors: Vec<Value> = capture::outputs()
-            .unwrap_or_default()
+            .collect();
+        let monitors: Vec<Value> = self
+            .real_monitors(&hub)
             .into_iter()
-            .filter(|o| Some(&o.name) != virt.as_ref())
             .enumerate()
             .map(|(i, o)| json!({"index": i, "name": o.name, "w": o.rect.w, "h": o.rect.h}))
             .collect();
+        drop(hub);
         json!({
             "t": "state",
             "on": on,
-            "prefs": p,
+            "prefs": {"connections": p.connections, "measure": p.measure},
             "code": on.then(|| prefs::pretty_key(&self.key())),
-            "net": net,
+            "connections": {"local": local, "own": own, "cable": cable},
+            "setupUrl": self.setup_url(),
+            "pending": pending,
+            "devices": devices,
+            "maxDevices": MAX_DEVICES,
             "vdd": vdd,
-            "device": device,
-            "stream": stream,
-            "viewerStats": self.viewer_stats.lock().unwrap().clone(),
-            "hostStats": self.host_stats.lock().unwrap().clone(),
             "monitors": monitors,
             "ports": {"https": self.args.port, "http": self.args.http_port},
             "caFingerprint": self.ca_fingerprint,
         })
     }
 
-    /// Código QR de la dirección del visor, de la red Wi-Fi propia o de la página de configuración.
+    /// Código QR de la dirección de una conexión ("url-local", "url-own", "url-cable"), de la red
+    /// Wi-Fi propia ("wifi") o de la página de configuración ("setup").
     fn qr(&self, which: &str) -> Option<String> {
         let text = match which {
-            "url" => self.viewer_url()?,
             "wifi" => self.wifi_qr()?,
             "setup" => self.setup_url()?,
-            _ => return None,
+            w => self.viewer_url(w.strip_prefix("url-")?)?,
         };
         sys::qr_svg(&text).ok()
     }
@@ -905,16 +1289,7 @@ impl App {
     pub async fn watch_ips(self: Arc<Self>) {
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
-            match self.certs.ensure().and_then(|changed| {
-                if changed {
-                    *self.resolver.0.write().unwrap() = certified_key(&self.certs)?;
-                }
-                Ok(changed)
-            }) {
-                Ok(true) => log::info!("Certificado actualizado. Direcciones: {:?}", certs::usable_ips()),
-                Ok(false) => {}
-                Err(e) => log::warn!("No se pudo actualizar el certificado: {e:#}"),
-            }
+            self.refresh_cert();
         }
     }
 
@@ -952,12 +1327,16 @@ async fn forward(
     extend: bool,
     max_inflight_ms: f64,
     host_stats: Arc<StdMutex<Value>>,
+    name: String,
 ) {
     let limit = ((s.fps as f64 * max_inflight_ms / 1000.0).round() as u32).max(3);
     let send_json = |v: Value| {
         let _ = tx.send(Message::text(v.to_string()));
     };
-    let (mut seq, mut last_sent) = (0u32, 0u32);
+    // El número de secuencia sigue desde el último confirmado: el dispositivo confirma por
+    // número y una captura nueva no debe parecer atrasada.
+    let mut seq = acked.load(Ordering::Relaxed);
+    let mut last_sent = seq;
     let mut waiting_key = false;
     let mut last_key_request = Instant::now() - Duration::from_secs(1);
     let (mut frames, mut sent, mut dropped, mut keys, mut bytes) = (0u32, 0u32, 0u32, 0u32, 0usize);
@@ -972,7 +1351,7 @@ async fn forward(
                 let Some(ev) = ev else { break };
                 match ev {
                     Event::Started { encoder, src_w, src_h } => {
-                        log::info!("Codificador: {encoder}");
+                        log::debug!("{name}: codificador {encoder}");
                         encoder_name = encoder;
                         src = (src_w, src_h);
                     }
@@ -1016,7 +1395,7 @@ async fn forward(
                         "rgba": base64::engine::general_purpose::STANDARD.encode(&shape.rgba),
                     })),
                     Event::Error(e) => {
-                        log::error!("Captura/codificación: {e}");
+                        log::error!("{name}: captura/codificación: {e}");
                         send_json(json!({"t": "error", "message": format!("Error en el ordenador: {e}")}));
                     }
                 }
@@ -1062,7 +1441,7 @@ async fn handle_conn(app: Arc<App>, stream: TcpStream, peer: IpAddr, port: u16) 
     if !app.peer_allowed(peer) {
         // Se corta sin responder nada. Se avisa una vez por dirección para no llenar el registro.
         if app.rejected.lock().unwrap().insert(peer) {
-            let why = if app.is_on() { "solo se aceptan dispositivos de la red propia" } else { "la pantalla está apagada" };
+            let why = if app.is_on() { "llega por una conexión que no está activa" } else { "la pantalla está apagada" };
             log::info!("Conexión de {peer} rechazada: {why}");
         }
         return Ok(());
@@ -1166,7 +1545,7 @@ async fn handle_http(app: Arc<App>, mut io: Box<dyn Io>, tls: bool, peer: IpAddr
         log::info!("{peer} {method} {path}{}", if tls { "" } else { " (sin cifrar)" });
     }
 
-    if !local && LOCAL_ONLY_PATHS.contains(&path) {
+    if !local && (LOCAL_ONLY_PATHS.contains(&path) || path.starts_with("/qr/")) {
         return respond(&mut io, 403, "text/plain; charset=utf-8", "Solo desde este ordenador".as_bytes(), &[], false).await;
     }
     if !tls && !local && !PLAIN_HTTP_PATHS.contains(&path) {
@@ -1193,7 +1572,7 @@ async fn handle_http(app: Arc<App>, mut io: Box<dyn Io>, tls: bool, peer: IpAddr
     match path {
         "/ca.crt" => {
             let body = tokio::fs::read(&app.certs.ca_crt).await?;
-            let disp = ("Content-Disposition", "attachment; filename=\"pantalla-secundaria-ca.crt\"".to_string());
+            let disp = ("Content-Disposition", "attachment; filename=\"xtendedview-ca.crt\"".to_string());
             respond(&mut io, 200, "application/x-x509-ca-cert", &body, &[disp], head_only).await
         }
         "/info" => {
@@ -1233,6 +1612,8 @@ async fn static_file(root: &Path, name: &str) -> Option<(Vec<u8>, &'static str)>
         "css" => "text/css; charset=utf-8",
         "json" => "application/json",
         "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "ico" => "image/x-icon",
         "webmanifest" => "application/manifest+json",
         _ => "application/octet-stream",
     };
@@ -1310,10 +1691,29 @@ fn pong(tx: &mpsc::UnboundedSender<Message>, v: &Value) {
     let _ = tx.send(Message::text(pong.to_string()));
 }
 
+/// Identificador del dispositivo que manda su navegador (o, si es un visor antiguo, su IP).
+fn device_id(hello: &Value, peer: IpAddr) -> String {
+    let id: String = hello["id"].as_str().unwrap_or("").chars().filter(|c| c.is_ascii_alphanumeric()).take(40).collect();
+    if id.len() >= 8 {
+        id
+    } else {
+        format!("ip{}", peer.to_string().replace(['.', ':'], "-"))
+    }
+}
+
 async fn viewer_session(app: Arc<App>, mut stream: WsStream, tx: mpsc::UnboundedSender<Message>, peer: IpAddr, role: String) {
-    let id = app.next_id.fetch_add(1, Ordering::Relaxed);
+    let conn = app.next_id.fetch_add(1, Ordering::Relaxed);
     let acked = Arc::new(AtomicU32::new(0));
-    log::info!("Conectado {peer} ({role})");
+    let send = |v: Value| {
+        let _ = tx.send(Message::text(v.to_string()));
+    };
+    let bye = |reason: &str, retry: bool| {
+        let _ = tx.send(Message::text(json!({"t": "bye", "reason": reason, "retry": retry}).to_string()));
+        let _ = tx.send(Message::Close(None));
+    };
+    log::debug!("Conectado {peer} ({role})");
+    // Aceptado en esta conexión: los "hello" siguientes (al girar o plegar) solo actualizan.
+    let mut accepted = false;
     while let Some(v) = next_json(&mut stream).await {
         let kind = v["t"].as_str().unwrap_or("");
         if kind == "ping" {
@@ -1323,62 +1723,72 @@ async fn viewer_session(app: Arc<App>, mut stream: WsStream, tx: mpsc::Unbounded
         if role != "viewer" {
             continue; // la sonda solo sincroniza el reloj
         }
-        let active = app.active_viewer.load(Ordering::Relaxed) == id;
         match kind {
             "hello" if !app.is_on() => {
-                let bye = json!({"t": "bye", "reason": OFF_REASON, "retry": false});
-                let _ = tx.send(Message::text(bye.to_string()));
-                let _ = tx.send(Message::Close(None));
+                bye(OFF_REASON, false);
                 break;
             }
             "hello" => {
-                let given: String = v["key"].as_str().unwrap_or("").chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-                match app.check_key(&given).await {
-                    Some(true) => {}
-                    Some(false) => {
-                        log::warn!("Código de emparejamiento incorrecto desde {peer}");
-                        let _ = tx.send(Message::text(json!({"t": "auth", "ok": false}).to_string()));
-                        let _ = tx.send(Message::Close(None));
-                        break;
+                let device = device_id(&v, peer);
+                let via = app.classify(peer, &sys::interfaces());
+                if !accepted {
+                    let given: String = v["key"].as_str().unwrap_or("").chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+                    match app.check_key(&given).await {
+                        Some(true) => {}
+                        Some(false) => {
+                            log::warn!("Código de emparejamiento incorrecto desde {peer}");
+                            send(json!({"t": "auth", "ok": false}));
+                            let _ = tx.send(Message::Close(None));
+                            break;
+                        }
+                        None => {
+                            log::warn!("Demasiados intentos de código a la vez; rechazado {peer}");
+                            bye("Demasiados intentos de conexión. Espera unos segundos.", true);
+                            break;
+                        }
                     }
-                    None => {
-                        log::warn!("Demasiados intentos de código a la vez; rechazado {peer}");
-                        let bye = json!({"t": "bye", "reason": "Demasiados intentos de conexión. Espera unos segundos."});
-                        let _ = tx.send(Message::text(bye.to_string()));
-                        let _ = tx.send(Message::Close(None));
-                        break;
+                    let client = Client::parse(&v, peer);
+                    match app.wait_approval(&device, &client, via, &mut stream, &tx).await {
+                        Some(true) => accepted = true,
+                        Some(false) => {
+                            bye("El ordenador no ha aceptado la conexión.", true);
+                            break;
+                        }
+                        None => break,
                     }
                 }
-                if let Err(e) = app.attach(id, &tx, &acked, &v, peer).await {
+                if let Err(e) = app.attach(conn, &device, via, &tx, &acked, &v, peer).await {
                     if !app.is_on() {
-                        let bye = json!({"t": "bye", "reason": OFF_REASON, "retry": false});
-                        let _ = tx.send(Message::text(bye.to_string()));
-                        let _ = tx.send(Message::Close(None));
+                        bye(OFF_REASON, false);
                         break;
                     }
-                    log::error!("No se pudo iniciar la captura: {e:#}");
-                    let msg = json!({"t": "error", "message": format!("Error en el ordenador: {e:#}")});
-                    let _ = tx.send(Message::text(msg.to_string()));
+                    log::error!("No se pudo conectar el dispositivo: {e:#}");
+                    if e.to_string().contains("dispositivos conectados") {
+                        bye(&format!("No se puede conectar: {e:#}."), true);
+                        break;
+                    }
+                    send(json!({"t": "error", "message": format!("Error en el ordenador: {e:#}")}));
                 }
             }
-            "ack" if active => {
+            "ack" if accepted => {
                 acked.fetch_max(v["seq"].as_u64().unwrap_or(0) as u32, Ordering::Relaxed);
             }
-            "pointer" if active => {
-                if let Ok(ev) = serde_json::from_value::<PointerEvent>(v) {
-                    app.injector.lock().unwrap().pointer(&ev);
+            "pointer" if accepted => {
+                let rect = app.rects.lock().unwrap().get(&conn).copied();
+                if let (Some(rect), Ok(ev)) = (rect, serde_json::from_value::<PointerEvent>(v)) {
+                    app.injector.lock().unwrap().pointer(conn, rect, &ev);
                 }
             }
-            "wheel" if active => {
+            "wheel" if accepted => {
                 let (dx, dy) = (v["dx"].as_f64().unwrap_or(0.0), v["dy"].as_f64().unwrap_or(0.0));
                 app.injector.lock().unwrap().wheel(dx, dy);
             }
-            "stats" if active => app.client_stats(&v),
+            "stats" if accepted => app.client_stats(conn, &v).await,
             _ => {}
         }
     }
-    log::info!("Desconectado {peer} ({role})");
-    app.detach(id).await;
+    log::debug!("Desconectado {peer} ({role})");
+    app.detach(conn).await;
 }
 
 /// Panel de control (solo desde este ordenador): recibe el estado cada segundo y en cuanto
@@ -1393,10 +1803,14 @@ async fn panel_session(app: Arc<App>, mut stream: WsStream, tx: mpsc::UnboundedS
         tokio::select! {
             v = next_json(&mut stream) => {
                 let Some(v) = v else { break };
-                let reply = match v["t"].as_str().unwrap_or("") {
+                let s = |k: &str| v[k].as_str().unwrap_or("").to_string();
+                let reply: Result<Option<String>> = match v["t"].as_str().unwrap_or("") {
                     "ping" => { pong(&tx, &v); continue; }
-                    "set" => app.set_pref(v["key"].as_str().unwrap_or(""), &v["value"]).await,
-                    "action" => app.action(v["name"].as_str().unwrap_or("")).await.map(Some),
+                    "set" => app.set_pref(&s("key"), &v["value"]).await.map(|_| None),
+                    "setDevice" => app.set_device(&s("device"), &s("key"), &v["value"]).await.map(|_| None),
+                    "connection" => app.set_connection(&s("kind"), v["enabled"].as_bool().unwrap_or(false)).await.map(Some),
+                    "decide" => app.decide(v["id"].as_u64().unwrap_or(0), v["accept"].as_bool().unwrap_or(false)).map(Some),
+                    "action" => app.action(&s("name"), &s("device")).await.map(Some),
                     _ => continue,
                 };
                 let notice = match reply {
@@ -1412,5 +1826,31 @@ async fn panel_session(app: Arc<App>, mut stream: WsStream, tx: mpsc::UnboundedS
             _ = tick.tick() => send_state(app.clone(), tx.clone()).await,
             _ = app.changed.notified() => send_state(app.clone(), tx.clone()).await,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stacks_virtual_monitors_on_the_same_side() {
+        let main = Rect { x: 0, y: 0, w: 2880, h: 1800 };
+        // Primero a la derecha, junto al portátil.
+        assert_eq!(stacked_position(main, (1920, 1200), "right", &[]), (2880, 300));
+        // Otro a la derecha: por fuera del primero.
+        let first = Rect { x: 2880, y: 300, w: 1920, h: 1200 };
+        assert_eq!(stacked_position(main, (1600, 1200), "right", &[first]), (4800, 300));
+        // A la izquierda de otro que ya está a la izquierda.
+        let left = Rect { x: -1920, y: 300, w: 1920, h: 1200 };
+        assert_eq!(stacked_position(main, (1600, 1000), "left", &[left]), (-3520, 400));
+    }
+
+    #[test]
+    fn device_ids_are_sanitized() {
+        let ip: IpAddr = "192.168.0.20".parse().unwrap();
+        assert_eq!(device_id(&json!({"id": "a1b2c3d4e5f6"}), ip), "a1b2c3d4e5f6");
+        assert_eq!(device_id(&json!({"id": "../../x"}), ip), "ip192-168-0-20");
+        assert_eq!(device_id(&json!({}), ip), "ip192-168-0-20");
     }
 }

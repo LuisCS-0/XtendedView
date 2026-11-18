@@ -1,17 +1,28 @@
 //! Ajustes que se eligen en el panel del ordenador y se guardan entre sesiones
-//! (certs/ajustes.json). El dispositivo conectado solo muestra la pantalla.
+//! (certs/ajustes.json). Los dispositivos solo muestran la pantalla.
+//!
+//! - Generales: qué conexiones están activas y si se mide la latencia.
+//! - Por dispositivo (cada uno con su identificador, que guarda su navegador): modo, lado,
+//!   monitor, fotogramas, calidad, resolución, pantalla completa y estadísticas. Un dispositivo
+//!   nuevo empieza con los valores por defecto.
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+/// Formas de conectar un dispositivo.
+pub const CONNECTIONS: [&str; 3] = ["local", "own", "cable"];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct Prefs {
-    /// "local": la red a la que ya está conectado el ordenador. "own": red Wi-Fi propia.
-    pub network: String,
+pub struct DevicePrefs {
+    /// Nombre con el que se vio por última vez ("SM-F971B · Android · Chrome").
+    pub name: String,
     /// "extend": pantalla adicional. "mirror": espejo de un monitor.
     pub mode: String,
     /// Lado del ordenador en el que está el dispositivo: "left", "right", "top", "bottom".
     pub side: String,
+    /// Monitor que se duplica en modo espejo.
+    pub monitor: usize,
     /// Fotogramas por segundo; 0 = los de la pantalla del dispositivo.
     pub fps: u32,
     /// Calidad en Mbps.
@@ -22,50 +33,28 @@ pub struct Prefs {
     pub fullscreen: bool,
     /// Estadísticas encima de la imagen, en el dispositivo.
     pub stats: bool,
-    /// Medir la latencia total con la sonda.
-    pub measure: bool,
-    /// Monitor que se duplica en modo espejo.
-    pub monitor: usize,
 }
 
-impl Default for Prefs {
+impl Default for DevicePrefs {
     fn default() -> Self {
         Self {
-            network: "local".into(),
+            name: String::new(),
             mode: "extend".into(),
             side: "right".into(),
+            monitor: 0,
             fps: 0,
             bitrate: 20,
             scale: 1.0,
             fullscreen: true,
             stats: false,
-            measure: false,
-            monitor: 0,
         }
     }
 }
 
-impl Prefs {
-    pub fn load(path: &Path) -> Self {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<Prefs>(&s).ok())
-            .map(Prefs::sanitized)
-            .unwrap_or_default()
-    }
-
-    pub fn save(&self, path: &Path) {
-        if let Ok(s) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(path, s);
-        }
-    }
-
+impl DevicePrefs {
     /// Corrige valores fuera de rango (fichero editado a mano, versiones antiguas…).
     pub fn sanitized(mut self) -> Self {
-        let d = Prefs::default();
-        if !["local", "own"].contains(&self.network.as_str()) {
-            self.network = d.network;
-        }
+        let d = DevicePrefs::default();
         if !["extend", "mirror"].contains(&self.mode.as_str()) {
             self.mode = d.mode;
         }
@@ -79,14 +68,14 @@ impl Prefs {
         if ![1.0, 0.75, 0.5].contains(&self.scale) {
             self.scale = 1.0;
         }
+        self.name = self.name.chars().take(80).collect();
         self
     }
 
-    /// Aplica un cambio enviado por el panel. Devuelve false si el valor no es válido.
+    /// Aplica un cambio del panel. Devuelve false si el valor no es válido.
     pub fn set(&mut self, key: &str, v: &serde_json::Value) -> bool {
         let before = self.clone();
         match key {
-            "network" => self.network = v.as_str().unwrap_or("").into(),
             "mode" => self.mode = v.as_str().unwrap_or("").into(),
             "side" => self.side = v.as_str().unwrap_or("").into(),
             "fps" => self.fps = v.as_u64().unwrap_or(99) as u32,
@@ -94,16 +83,116 @@ impl Prefs {
             "scale" => self.scale = v.as_f64().unwrap_or(0.0),
             "fullscreen" => self.fullscreen = v.as_bool().unwrap_or(self.fullscreen),
             "stats" => self.stats = v.as_bool().unwrap_or(self.stats),
-            "measure" => self.measure = v.as_bool().unwrap_or(self.measure),
             "monitor" => self.monitor = v.as_u64().unwrap_or(0) as usize,
             _ => return false,
         }
-        let fixed = self.clone().sanitized();
-        if fixed != *self {
+        if self.clone().sanitized() != *self {
             *self = before; // valor inválido: se deja como estaba
             return false;
         }
         true
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Prefs {
+    /// Conexiones activas: "local" (la red del ordenador), "own" (red Wi-Fi propia) y "cable"
+    /// (anclaje USB o Ethernet directo). Puede haber varias a la vez.
+    pub connections: Vec<String>,
+    /// Medir la latencia total con la sonda (en todos los dispositivos).
+    pub measure: bool,
+    /// Ajustes de cada dispositivo, por su identificador.
+    pub devices: BTreeMap<String, DevicePrefs>,
+    /// Versiones anteriores: una sola conexión. Se pasa a `connections` al cargar.
+    #[serde(skip_serializing)]
+    network: Option<String>,
+}
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Self { connections: vec!["local".into()], measure: false, devices: BTreeMap::new(), network: None }
+    }
+}
+
+impl Prefs {
+    pub fn load(path: &Path) -> Self {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        let mut p = serde_json::from_str::<Prefs>(&text).unwrap_or_default();
+        if let Some(old) = p.network.take() {
+            if p.connections == Prefs::default().connections {
+                p.connections = vec![old];
+            }
+        }
+        // Versiones anteriores guardaban los ajustes de la pantalla sueltos: valen como los de
+        // un dispositivo nuevo.
+        if p.devices.is_empty() && text.contains("\"mode\"") {
+            if let Ok(old) = serde_json::from_str::<DevicePrefs>(&text) {
+                p.devices.insert(String::new(), old);
+            }
+        }
+        p.sanitized()
+    }
+
+    pub fn save(&self, path: &Path) {
+        if let Ok(s) = serde_json::to_string_pretty(self) {
+            let _ = std::fs::write(path, s);
+        }
+    }
+
+    pub fn sanitized(mut self) -> Self {
+        self.connections.retain(|c| CONNECTIONS.contains(&c.as_str()));
+        self.connections.dedup();
+        self.devices = std::mem::take(&mut self.devices).into_iter().map(|(k, v)| (k, v.sanitized())).collect();
+        self
+    }
+
+    pub fn has(&self, connection: &str) -> bool {
+        self.connections.iter().any(|c| c == connection)
+    }
+
+    /// Activa o desactiva una conexión. Devuelve false si no existe.
+    pub fn set_connection(&mut self, connection: &str, enabled: bool) -> bool {
+        if !CONNECTIONS.contains(&connection) {
+            return false;
+        }
+        self.connections.retain(|c| c != connection);
+        if enabled {
+            self.connections.push(connection.into());
+            // Siempre en el mismo orden, para el panel.
+            self.connections.sort_by_key(|c| CONNECTIONS.iter().position(|k| k == c));
+        }
+        true
+    }
+
+    /// Ajustes de un dispositivo: los suyos o, si es nuevo, los de partida (los de la versión
+    /// anterior, si los había, guardados con clave vacía).
+    pub fn device(&self, id: &str) -> DevicePrefs {
+        self.devices
+            .get(id)
+            .or_else(|| self.devices.get(""))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn set_device(&mut self, id: &str, key: &str, v: &serde_json::Value) -> bool {
+        let mut d = self.device(id);
+        if !d.set(key, v) {
+            return false;
+        }
+        self.devices.insert(id.into(), d);
+        true
+    }
+
+    /// Guarda el nombre con el que se ha visto el dispositivo (y crea sus ajustes si es nuevo).
+    pub fn remember_device(&mut self, id: &str, name: &str, side: Option<&str>) {
+        let mut d = self.device(id);
+        let new = !self.devices.contains_key(id);
+        d.name = name.chars().take(80).collect();
+        if let (true, Some(s)) = (new, side) {
+            d.side = s.into(); // un lado libre para que no se tapen
+        }
+        self.devices.insert(id.into(), d);
     }
 }
 
@@ -135,5 +224,39 @@ pub fn pretty_key(key: &str) -> String {
         format!("{}-{}", &key[..4], &key[4..])
     } else {
         key.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrates_old_single_device_settings() {
+        let dir = std::env::temp_dir().join(format!("xv-prefs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("ajustes.json");
+        std::fs::write(&file, r#"{"network":"cable","wireless":"local","mode":"mirror","side":"left","fps":60,"bitrate":35,"scale":1.0,"fullscreen":true,"stats":false,"measure":true,"monitor":0}"#).unwrap();
+        let p = Prefs::load(&file);
+        assert_eq!(p.connections, vec!["cable".to_string()]);
+        assert!(p.measure);
+        // Un dispositivo nuevo hereda lo que había.
+        let d = p.device("nuevo");
+        assert_eq!((d.mode.as_str(), d.side.as_str(), d.fps, d.bitrate), ("mirror", "left", 60, 35));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn devices_keep_their_own_settings() {
+        let mut p = Prefs::default();
+        assert!(p.set_device("a", "mode", &serde_json::json!("mirror")));
+        assert!(p.set_device("b", "side", &serde_json::json!("left")));
+        assert!(!p.set_device("b", "fps", &serde_json::json!(75)));
+        assert_eq!(p.device("a").mode, "mirror");
+        assert_eq!(p.device("b").mode, "extend");
+        assert_eq!(p.device("b").side, "left");
+        assert!(p.set_connection("own", true));
+        assert!(p.set_connection("local", false));
+        assert_eq!(p.connections, vec!["own".to_string()]);
     }
 }

@@ -88,16 +88,19 @@ pub struct PointerEvent {
     pub bt: u32,
 }
 
+/// Uno para todos los dispositivos: Windows solo tiene un táctil inyectado. Cada evento llega
+/// con el monitor del dispositivo que lo manda, y los contactos se distinguen por dispositivo
+/// para que dos dedos en pantallas distintas no se confundan.
 pub struct Injector {
-    pub monitor: Option<Rect>,
     touch_ok: bool,
     contacts: Vec<(u32, i32, i32)>, // (slot, x, y)
-    slots: HashMap<String, u32>,
+    slots: HashMap<String, u32>,    // "dispositivo:dedo" → slot
     last_touch: Instant,
-    mouse_buttons: Vec<i32>,
+    mouse_buttons: Vec<(u64, i32)>,
     pen: Option<PenDevice>,
     pen_unavailable: bool,
     pen_contact: bool,
+    pen_owner: u64,
     pen_at: (i32, i32),
 }
 
@@ -105,7 +108,6 @@ impl Injector {
     pub fn new() -> Self {
         let touch_ok = unsafe { InitializeTouchInjection(MAX_CONTACTS, TOUCH_FEEDBACK_DEFAULT) }.is_ok();
         Self {
-            monitor: None,
             touch_ok,
             contacts: Vec::new(),
             slots: HashMap::new(),
@@ -114,6 +116,7 @@ impl Injector {
             pen: None,
             pen_unavailable: false,
             pen_contact: false,
+            pen_owner: 0,
             pen_at: (0, 0),
         }
     }
@@ -189,24 +192,23 @@ impl Injector {
         true
     }
 
-    fn to_screen(&self, nx: f64, ny: f64) -> Option<(i32, i32)> {
-        let m = self.monitor?;
+    fn to_screen(m: Rect, nx: f64, ny: f64) -> (i32, i32) {
         let nx = nx.clamp(0.0, 1.0);
         let ny = ny.clamp(0.0, 1.0);
-        Some((
-            m.x + (nx * (m.w - 1) as f64).round() as i32,
-            m.y + (ny * (m.h - 1) as f64).round() as i32,
-        ))
+        (m.x + (nx * (m.w - 1) as f64).round() as i32, m.y + (ny * (m.h - 1) as f64).round() as i32)
     }
 
-    pub fn pointer(&mut self, ev: &PointerEvent) {
-        let Some((x, y)) = self.to_screen(ev.x, ev.y) else { return };
+    /// Evento del dispositivo `owner`, que muestra el monitor `monitor`.
+    pub fn pointer(&mut self, owner: u64, monitor: Rect, ev: &PointerEvent) {
+        let (x, y) = Self::to_screen(monitor, ev.x, ev.y);
         if ev.kind == "touch" && self.touch_ok {
-            self.touch(&ev.id.to_string(), &ev.e, x, y);
+            self.touch(&format!("{owner}:{}", ev.id), &ev.e, x, y);
         } else if ev.kind == "pen" && self.pen(ev, x, y) {
-            // inyectado como lápiz
+            if ev.e == "down" {
+                self.pen_owner = owner;
+            }
         } else if ev.e != "leave" {
-            self.mouse(&ev.e, x, y, ev.b);
+            self.mouse(owner, &ev.e, x, y, ev.b);
         }
     }
 
@@ -219,7 +221,7 @@ impl Injector {
         }
     }
 
-    fn mouse(&mut self, kind: &str, x: i32, y: i32, button: i32) {
+    fn mouse(&mut self, owner: u64, kind: &str, x: i32, y: i32, button: i32) {
         let (vx, vy, vw, vh) = unsafe {
             (
                 GetSystemMetrics(SM_XVIRTUALSCREEN),
@@ -235,11 +237,11 @@ impl Injector {
         match kind {
             "down" => {
                 flags |= down;
-                self.mouse_buttons.push(button);
+                self.mouse_buttons.push((owner, button));
             }
-            "up" | "cancel" if self.mouse_buttons.contains(&button) => {
+            "up" | "cancel" if self.mouse_buttons.contains(&(owner, button)) => {
                 flags |= up;
-                self.mouse_buttons.retain(|b| *b != button);
+                self.mouse_buttons.retain(|b| *b != (owner, button));
             }
             _ => {}
         }
@@ -285,21 +287,22 @@ impl Injector {
         }
     }
 
-    pub fn release_all(&mut self) {
-        if !self.contacts.is_empty() {
-            let all: Vec<(u32, POINTER_FLAGS)> = self
-                .contacts
-                .iter()
-                .map(|c| (c.0, POINTER_FLAG_UP | POINTER_FLAG_CANCELED))
-                .collect();
-            self.inject(&all);
-            self.contacts.clear();
-            self.slots.clear();
+    /// Suelta todo lo que tenga pulsado el dispositivo `owner` (se ha desconectado a mitad).
+    pub fn release(&mut self, owner: u64) {
+        let prefix = format!("{owner}:");
+        let mine: Vec<u32> = self.slots.iter().filter(|(k, _)| k.starts_with(&prefix)).map(|(_, s)| *s).collect();
+        if !mine.is_empty() {
+            let lift: Vec<(u32, POINTER_FLAGS)> = mine.iter().map(|s| (*s, POINTER_FLAG_UP | POINTER_FLAG_CANCELED)).collect();
+            self.inject(&lift);
+            self.contacts.retain(|c| !mine.contains(&c.0));
+            self.slots.retain(|k, _| !k.starts_with(&prefix));
         }
-        for b in std::mem::take(&mut self.mouse_buttons) {
+        let (gone, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut self.mouse_buttons).into_iter().partition(|(o, _)| *o == owner);
+        self.mouse_buttons = keep;
+        for (_, b) in gone {
             send_mouse(0, 0, button_flags(b).1, 0);
         }
-        if self.pen_contact {
+        if self.pen_contact && self.pen_owner == owner {
             // Levantar el lápiz si el visor se desconecta a mitad de un trazo.
             let lift = PointerEvent {
                 e: "cancel".into(),

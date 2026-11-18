@@ -1,8 +1,8 @@
 [package]
-name = "pantalla-host"
+name = "xtendedview"
 version = "0.1.0"
 edition = "2021"
-description = "Host de pantalla secundaria: captura sin copias (DDA + D3D11) y H.264 por QuickSync (Media Foundation)"
+description = "XtendedView: usa un móvil, una tablet u otro dispositivo con navegador como pantalla del ordenador (captura sin copias DDA + D3D11 y H.264 por QuickSync)"
 
 [dependencies]
 anyhow = "1"
@@ -48,6 +48,8 @@ features = [
     "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinSock",
     "Win32_System_Com",
+    "Win32_System_Console",
+    "Win32_System_LibraryLoader",
     "Win32_System_Ole",
     "Win32_System_Threading",
     "Win32_System_Variant",
@@ -62,3 +64,6 @@ features = [
 [profile.release]
 opt-level = 3
 debug = 1
+
+[build-dependencies]
+embed-resource = "3.0.12"

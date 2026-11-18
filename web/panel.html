@@ -3,19 +3,19 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Pantalla secundaria</title>
-  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <title>XtendedView</title>
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" href="/icon-192.png" type="image/png" sizes="192x192">
   <link rel="stylesheet" href="/panel.css">
 </head>
 <body>
   <header class="top">
-    <div class="brand">
-      <img src="/icon.svg" alt="">
-      <div>
-        <h1>Pantalla secundaria</h1>
-        <p>Usa un móvil o una tablet como pantalla de este ordenador. También sirve cualquier otro dispositivo con pantalla y navegador.</p>
-      </div>
-    </div>
+    <h1 class="brand">
+      <picture>
+        <source srcset="/logo-tema-oscuro.png" media="(prefers-color-scheme: dark)">
+        <img src="/logo-tema-claro.png" alt="XtendedView">
+      </picture>
+    </h1>
     <div class="top-right">
       <div id="status" class="pill" data-kind="wait">
         <span class="dot"></span><span id="status-text">Conectando con el host…</span>
@@ -27,194 +27,238 @@
     </div>
   </header>
 
-  <!-- Apagada: solo el botón de encendido -->
+  <!-- Apagada: se elige cómo conectar y eso la enciende -->
   <section id="power-screen" class="power-screen" hidden>
-    <button type="button" id="btn-on" class="power-btn" aria-describedby="power-sub">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v8"/><path d="M6.3 6.8a8 8 0 1 0 11.4 0"/></svg>
-      <span class="sr-only">Encender</span>
-    </button>
-    <h2 id="power-title">Encender</h2>
-    <p class="power-sub">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 9a14 14 0 0 1 19 0"/><path d="M5.5 12.5a9.5 9.5 0 0 1 13 0"/><path d="M8.7 16a5 5 0 0 1 6.6 0"/><circle cx="12" cy="19.4" r="1.2"/></svg>
-      <span id="power-sub">Empareja el dispositivo de forma inalámbrica</span>
-    </p>
+    <h2 class="start-title">¿Cómo quieres conectar el dispositivo?</h2>
+    <p class="start-sub">Elige una opción para empezar. Podrás cambiarla después desde el panel.</p>
+    <div class="connect-options" role="group" aria-label="Formas de conectar">
+      <button type="button" class="connect-card" data-network="local">
+        <span class="last-tag" hidden>Última vez</span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 9a14 14 0 0 1 19 0"/><path d="M5.5 12.5a9.5 9.5 0 0 1 13 0"/><path d="M8.7 16a5 5 0 0 1 6.6 0"/><circle class="dot" cx="12" cy="19.4" r="1.2"/></svg>
+        <strong>Red del ordenador</strong>
+        <small data-text="La Wi-Fi o la red a la que ya está conectado este ordenador">La Wi-Fi o la red a la que ya está conectado este ordenador</small>
+      </button>
+      <button type="button" class="connect-card" data-network="own">
+        <span class="last-tag" hidden>Última vez</span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle class="dot" cx="12" cy="12" r="2"/><path d="M8.5 15.5a5 5 0 0 1 0-7"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M5.6 18.4a9 9 0 0 1 0-12.8"/><path d="M18.4 5.6a9 9 0 0 1 0 12.8"/></svg>
+        <strong>Red propia</strong>
+        <small data-text="El ordenador crea su propia Wi-Fi, sin router ni internet">El ordenador crea su propia Wi-Fi, sin router ni internet</small>
+      </button>
+      <button type="button" class="connect-card" data-network="cable">
+        <span class="last-tag" hidden>Última vez</span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 2v5M15 2v5"/><path d="M7 7h10v4a5 5 0 0 1-10 0z"/><path d="M12 16v6"/></svg>
+        <strong>Cable USB <span class="badge">Experimental</span></strong>
+        <small data-text="Android con módem USB: la mínima latencia">Android con módem USB: la mínima latencia</small>
+      </button>
+    </div>
     <p id="power-summary" class="power-summary"></p>
-
-    <div class="or" aria-hidden="true">o</div>
-    <button type="button" class="alt-connect" disabled aria-describedby="cable-note">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 2v5M15 2v5"/><path d="M7 7h10v4a5 5 0 0 1-10 0z"/><path d="M12 16v6"/></svg>
-      <span><strong>Conectar por cable <span class="badge">Próximamente</span></strong>
-        <small id="cable-note">Por USB: sin depender de ninguna red y con la mínima latencia</small></span>
-    </button>
   </section>
 
-  <main class="layout" id="main" hidden>
-    <!-- 1. Conectar -->
-    <section class="card" aria-labelledby="h-connect">
-      <h2 id="h-connect"><span class="step">1</span>Conectar un dispositivo</h2>
+  <main id="main" hidden>
+    <!-- Dispositivos esperando a que los aceptes -->
+    <section id="pending" class="pending" aria-live="assertive" hidden></section>
 
-      <div class="seg" id="network" role="radiogroup" aria-label="Red">
-        <button type="button" role="radio" data-value="local">
-          <strong>Red del ordenador</strong><small>La Wi-Fi o el cable a los que ya está conectado</small>
-        </button>
-        <button type="button" role="radio" data-value="own">
-          <strong>Red propia</strong><small>El ordenador crea su propia Wi-Fi, sin router</small>
-        </button>
-      </div>
-
-      <div id="net-apply" class="apply-row" hidden>
-        <span id="net-apply-text"></span>
-        <button type="button" class="btn small" id="net-cancel">Cancelar</button>
-        <button type="button" class="btn small primary" id="net-apply-btn">Aplicar</button>
-      </div>
-
-      <p id="net-warning" class="note warn" hidden></p>
-
-      <div class="qrs">
-        <figure id="qr-wifi-box" hidden>
-          <img id="qr-wifi" alt="Código QR para unirse a la red Wi-Fi" width="190" height="190">
-          <figcaption><b>Paso 1.</b> Escanéalo con la cámara para unirte a la red <span id="qr-ssid"></span></figcaption>
-        </figure>
-        <figure id="qr-url-box">
-          <img id="qr-url" alt="Código QR para abrir la pantalla" width="190" height="190">
-          <figcaption id="qr-url-caption"></figcaption>
-        </figure>
-        <div id="qr-empty" class="qr-empty" hidden>Esperando a que haya red…</div>
-      </div>
-
-      <dl class="kv" id="net-kv"></dl>
-
-      <details class="help">
-        <summary>¿Primera vez con este dispositivo?</summary>
-        <p>El navegador avisará de que la conexión no es privada: toca <b>Configuración avanzada → Acceder</b>.
-          Para no volver a verlo, instala el certificado del ordenador desde <a id="setup-link" href="#" target="_blank" rel="noopener"></a>:</p>
-        <ul>
-          <li><b>Android:</b> Ajustes → Seguridad → Más ajustes de seguridad → Instalar desde almacenamiento → Certificado de CA.</li>
-          <li><b>iPad / iPhone:</b> Ajustes → Perfil descargado → Instalar; después General → Información → Ajustes de confianza de certificados.</li>
-        </ul>
-        <p>Si el dispositivo tenía el certificado de una versión anterior («Pantalla PoC CA…»), bórralo: la página de instalación explica cómo.</p>
-        <p>Huella del certificado, para comprobarla en el dispositivo:<br><code id="ca-fp" class="fp">—</code></p>
-      </details>
-    </section>
-
-    <!-- 2. Pantalla -->
-    <section class="card" aria-labelledby="h-display">
-      <h2 id="h-display"><span class="step">2</span>Pantalla</h2>
-
-      <div class="seg" data-pref="mode" role="radiogroup" aria-label="Modo">
-        <button type="button" role="radio" data-value="extend">
-          <strong>Pantalla adicional</strong><small>Amplía el escritorio</small>
-        </button>
-        <button type="button" role="radio" data-value="mirror">
-          <strong>Espejo</strong><small>Muestra lo mismo que un monitor</small>
-        </button>
-      </div>
-
-      <div id="extend-opts">
-        <p class="label">¿Dónde tienes el dispositivo respecto a este ordenador?</p>
-        <div class="side-picker" data-pref="side" role="radiogroup" aria-label="Posición del dispositivo">
-          <button type="button" role="radio" data-value="top" class="s-top">Encima</button>
-          <button type="button" role="radio" data-value="left" class="s-left">Izquierda</button>
-          <div class="s-center" aria-hidden="true"><div class="laptop"><div></div></div><span>Este ordenador</span></div>
-          <button type="button" role="radio" data-value="right" class="s-right">Derecha</button>
-          <button type="button" role="radio" data-value="bottom" class="s-bottom">Debajo</button>
+    <div class="layout">
+      <!-- Conexiones -->
+      <section class="card" aria-labelledby="h-connect">
+        <h2 id="h-connect">Conexiones</h2>
+        <div class="tabs" role="tablist" aria-label="Conexiones">
+          <button type="button" role="tab" data-conn="local"><span class="dot"></span>Red del ordenador</button>
+          <button type="button" role="tab" data-conn="own"><span class="dot"></span>Red propia</button>
+          <button type="button" role="tab" data-conn="cable"><span class="dot"></span>Cable USB <span class="badge">Experimental</span></button>
         </div>
-        <p class="hint">El ratón pasará de una pantalla a otra por ese lado.</p>
+
+        <!-- Red del ordenador -->
+        <div class="conn" data-conn-panel="local" role="tabpanel">
+          <div class="conn-head">
+            <p>La Wi-Fi o la red a la que ya está conectado este ordenador.</p>
+            <button type="button" class="btn small" data-toggle-conn="local"></button>
+          </div>
+          <p class="note warn" data-warn hidden></p>
+          <div class="qrs" data-qrs>
+            <figure><img data-qr="url-local" alt="Código QR para abrir la pantalla" width="190" height="190">
+              <figcaption><b>Escanéalo con la cámara</b> para abrir la pantalla en el navegador</figcaption></figure>
+          </div>
+          <dl class="kv" data-kv></dl>
+        </div>
+
+        <!-- Red propia -->
+        <div class="conn" data-conn-panel="own" role="tabpanel" hidden>
+          <div class="conn-head">
+            <p>El ordenador crea su propia Wi-Fi, sin router ni internet.</p>
+            <button type="button" class="btn small" data-toggle-conn="own"></button>
+          </div>
+          <p class="note warn" data-warn hidden></p>
+          <div class="qrs" data-qrs>
+            <figure><img data-qr="wifi" alt="Código QR para unirse a la red Wi-Fi" width="190" height="190">
+              <figcaption><b>Paso 1.</b> Escanéalo para unirte a la red <span data-ssid></span></figcaption></figure>
+            <figure><img data-qr="url-own" alt="Código QR para abrir la pantalla" width="190" height="190">
+              <figcaption><b>Paso 2.</b> Escanéalo para abrir la pantalla en el navegador</figcaption></figure>
+          </div>
+          <dl class="kv" data-kv></dl>
+        </div>
+
+        <!-- Cable -->
+        <div class="conn" data-conn-panel="cable" role="tabpanel" hidden>
+          <div class="conn-head">
+            <p>Android con módem USB: la mínima latencia y sin depender de ninguna red.</p>
+            <button type="button" class="btn small" data-toggle-conn="cable"></button>
+          </div>
+          <div class="cable-help" data-cable-help hidden>
+            <p class="cable-wait"><span class="spinner" aria-hidden="true"></span>Esperando el cable…</p>
+            <ol>
+              <li>Conecta el móvil al ordenador con un cable USB que sirva para datos (no solo para cargar).</li>
+              <li>En el móvil, activa el <b>módem USB</b>: Ajustes → Conexiones → Conexión compartida y Módem →
+                <b>Módem USB</b> (en otros Android, «Compartir conexión por USB» o «Anclaje de USB»).</li>
+              <li>En cuanto el ordenador lo detecte, aquí aparecerá el código QR para abrir la pantalla.</li>
+            </ol>
+            <p class="hint-left">iPad u otro ordenador: también sirve un adaptador USB-C a Ethernet con un cable de red
+              directo a este ordenador.</p>
+          </div>
+          <p class="note" data-route hidden>
+            <span data-route-text></span>
+            <button type="button" class="btn small" data-action="fixCableRoute" data-route-fix>Usar la Wi-Fi para internet</button>
+          </p>
+          <div class="qrs" data-qrs>
+            <figure><img data-qr="url-cable" alt="Código QR para abrir la pantalla" width="190" height="190">
+              <figcaption><b>Escanéalo con el móvil</b> para abrir la pantalla en el navegador</figcaption></figure>
+          </div>
+          <dl class="kv" data-kv></dl>
+        </div>
+
+        <p id="cable-offer" class="note" hidden>
+          <span>Hay un móvil conectado por cable (<b id="cable-offer-name"></b>). Por cable tendrás menos latencia y sin tirones.</span>
+          <button type="button" class="btn small primary" data-toggle-on="cable">Activar el cable</button>
+        </p>
+
+        <details class="help">
+          <summary>¿Primera vez con este dispositivo?</summary>
+          <p>El navegador avisará de que la conexión no es privada: toca <b>Configuración avanzada → Acceder</b>.
+            Para no volver a verlo, instala el certificado del ordenador desde <a id="setup-link" href="#" target="_blank" rel="noopener"></a>:</p>
+          <ul>
+            <li><b>Android:</b> Ajustes → Seguridad → Más ajustes de seguridad → Instalar desde almacenamiento → Certificado de CA.</li>
+            <li><b>iPad / iPhone:</b> Ajustes → Perfil descargado → Instalar; después General → Información → Ajustes de confianza de certificados.</li>
+          </ul>
+          <p>Si el dispositivo tenía el certificado de una versión anterior («Pantalla PoC CA…» o «Pantalla secundaria - CA local…»), bórralo: la página de instalación explica cómo.</p>
+          <p>Huella del certificado, para comprobarla en el dispositivo:<br><code id="ca-fp" class="fp">—</code></p>
+        </details>
+      </section>
+
+      <!-- General -->
+      <section class="card" aria-labelledby="h-general">
+        <h2 id="h-general">General</h2>
+        <dl class="kv">
+          <dt>Código de emparejamiento</dt><dd class="code"><b id="code">—</b></dd>
+          <dt>Dispositivos</dt><dd id="device-count">—</dd>
+        </dl>
+        <p class="hint-left">Cada dispositivo que se conecta tiene que aceptarse aquí. Los ya aceptados no vuelven a preguntar
+          hasta que apagues.</p>
+        <div class="switch-row">
+          <div>
+            <strong>Medir latencia total</strong>
+            <small>En todos los dispositivos. Necesita la sonda visible en la pantalla que reciben.</small>
+          </div>
+          <div class="inline">
+            <button type="button" class="btn small" data-action="openProbe">Abrir sonda</button>
+            <label class="switch"><input type="checkbox" id="measure" aria-label="Medir latencia total"><span></span></label>
+          </div>
+        </div>
         <p id="vdd-missing" class="note warn" hidden>Para la pantalla adicional hace falta el driver Parsec VDD
           (<a href="https://builds.parsec.app/vdd/parsec-vdd-0.41.0.0.exe" target="_blank" rel="noopener">descargar</a>).
           Mientras tanto se usará el modo espejo.</p>
-      </div>
+        <div class="actions">
+          <span class="spacer"></span>
+          <button type="button" class="btn" data-action="newCode">Cambiar código</button>
+        </div>
+      </section>
+    </div>
 
-      <div id="mirror-opts" hidden>
-        <label class="field">Monitor que se duplica
-          <select data-pref="monitor" id="monitor"></select>
-        </label>
-      </div>
-
-      <div class="switch-row">
-        <div>
-          <strong>Pantalla completa en el dispositivo</strong>
-          <small>Oculta las barras del navegador. El dispositivo pedirá un toque para activarla.</small>
-        </div>
-        <label class="switch"><input type="checkbox" data-pref="fullscreen" aria-label="Pantalla completa"><span></span></label>
-      </div>
-
-      <h3>Otros ajustes</h3>
-      <div class="fields">
-        <label class="field">Fotogramas
-          <select data-pref="fps">
-            <option value="0">Automático</option>
-            <option value="30">30 fps</option>
-            <option value="60">60 fps</option>
-            <option value="90">90 fps</option>
-            <option value="120">120 fps</option>
-          </select>
-        </label>
-        <label class="field">Calidad
-          <select data-pref="bitrate">
-            <option value="10">Ahorro · 10 Mbps</option>
-            <option value="20">Normal · 20 Mbps</option>
-            <option value="35">Alta · 35 Mbps</option>
-            <option value="50">Máxima · 50 Mbps</option>
-          </select>
-        </label>
-        <label class="field">Resolución
-          <select data-pref="scale">
-            <option value="1">La del dispositivo</option>
-            <option value="0.75">75 % · texto más grande</option>
-            <option value="0.5">50 % · texto mucho más grande</option>
-          </select>
-        </label>
-      </div>
-
-      <div class="switch-row">
-        <div>
-          <strong>Estadísticas en el dispositivo</strong>
-          <small>Fotogramas y latencias encima de la imagen</small>
-        </div>
-        <label class="switch"><input type="checkbox" data-pref="stats" aria-label="Estadísticas en el dispositivo"><span></span></label>
-      </div>
-      <div class="switch-row">
-        <div>
-          <strong>Medir latencia total</strong>
-          <small>Necesita la sonda visible en la pantalla que se envía al dispositivo</small>
-        </div>
-        <div class="inline">
-          <button type="button" class="btn small" data-action="openProbe">Abrir sonda</button>
-          <label class="switch"><input type="checkbox" data-pref="measure" aria-label="Medir latencia total"><span></span></label>
-        </div>
-      </div>
-    </section>
-
-    <!-- Información -->
-    <section class="card wide" aria-labelledby="h-info">
-      <h2 id="h-info">Información de la conexión</h2>
-      <div id="no-device" class="empty">Ningún dispositivo conectado. Escanea el código QR con el móvil o la tablet.</div>
-      <div id="device-info" hidden>
-        <div class="tiles">
-          <div class="tile" id="t-e2e"><span>Latencia total</span><b>—</b><small></small></div>
-          <div class="tile" id="t-net"><span>Red</span><b>—</b><small></small></div>
-          <div class="tile" id="t-rtt"><span>Ida y vuelta</span><b>—</b><small></small></div>
-          <div class="tile" id="t-dec"><span>Decodificación</span><b>—</b><small></small></div>
-          <div class="tile" id="t-enc"><span>Captura → codificado</span><b>—</b><small></small></div>
-          <div class="tile" id="t-fps"><span>Fotogramas</span><b>—</b><small></small></div>
-          <div class="tile" id="t-mbps"><span>Velocidad</span><b>—</b><small></small></div>
-          <div class="tile" id="t-drop"><span>Descartados</span><b>—</b><small></small></div>
-        </div>
-        <dl class="kv cols" id="info-kv"></dl>
-        <div id="exact-box" class="note" hidden>
-          <span id="exact-text"></span>
-          <button type="button" class="btn small primary" data-action="registerResolution">Registrar resolución exacta</button>
-        </div>
-      </div>
-      <div class="actions">
-        <span class="code">Código de emparejamiento: <b id="code">—</b></span>
-        <span class="spacer"></span>
-        <button type="button" class="btn" data-action="newCode">Cambiar código</button>
-        <button type="button" class="btn danger" data-action="disconnect" id="btn-disconnect">Desconectar dispositivo</button>
-      </div>
+    <!-- Dispositivos conectados -->
+    <section class="devices" aria-labelledby="h-devices">
+      <h2 id="h-devices" class="devices-title">Dispositivos conectados</h2>
+      <div id="no-device" class="card empty">Ningún dispositivo conectado. Escanea el código QR con el móvil, la tablet u otro
+        dispositivo con navegador: cada uno se configura por separado.</div>
+      <div id="device-list"></div>
     </section>
   </main>
+
+  <template id="device-template">
+    <article class="card device">
+      <header class="device-head">
+        <div>
+          <h3 data-f="name"></h3>
+          <p data-f="sub"></p>
+        </div>
+        <button type="button" class="btn small danger" data-act="disconnect">Desconectar</button>
+      </header>
+      <div class="device-body">
+        <div class="device-settings">
+          <div class="seg" role="radiogroup" aria-label="Modo">
+            <button type="button" role="radio" data-dkey="mode" data-value="extend"><strong>Pantalla adicional</strong><small>Amplía el escritorio</small></button>
+            <button type="button" role="radio" data-dkey="mode" data-value="mirror"><strong>Espejo</strong><small>Lo mismo que un monitor</small></button>
+          </div>
+          <div data-f="extend">
+            <p class="label">¿Dónde está este dispositivo respecto al ordenador?</p>
+            <div class="side-picker" role="radiogroup" aria-label="Posición del dispositivo">
+              <button type="button" role="radio" data-dkey="side" data-value="top" class="s-top">Encima</button>
+              <button type="button" role="radio" data-dkey="side" data-value="left" class="s-left">Izquierda</button>
+              <div class="s-center" aria-hidden="true"><div class="laptop"><div></div></div><span>Este ordenador</span></div>
+              <button type="button" role="radio" data-dkey="side" data-value="right" class="s-right">Derecha</button>
+              <button type="button" role="radio" data-dkey="side" data-value="bottom" class="s-bottom">Debajo</button>
+            </div>
+          </div>
+          <div data-f="mirror" hidden>
+            <label class="field">Monitor que se duplica <select data-dkey="monitor"></select></label>
+          </div>
+          <div class="fields">
+            <label class="field">Fotogramas
+              <select data-dkey="fps">
+                <option value="0">Automático</option><option value="30">30 fps</option><option value="60">60 fps</option>
+                <option value="90">90 fps</option><option value="120">120 fps</option>
+              </select>
+            </label>
+            <label class="field">Calidad
+              <select data-dkey="bitrate">
+                <option value="10">Ahorro · 10 Mbps</option><option value="20">Normal · 20 Mbps</option>
+                <option value="35">Alta · 35 Mbps</option><option value="50">Máxima · 50 Mbps</option>
+              </select>
+            </label>
+            <label class="field">Resolución
+              <select data-dkey="scale">
+                <option value="1">La del dispositivo</option><option value="0.75">75 % · texto más grande</option>
+                <option value="0.5">50 % · texto mucho más grande</option>
+              </select>
+            </label>
+          </div>
+          <div class="switch-row">
+            <div><strong>Pantalla completa</strong><small>El dispositivo pedirá un toque para activarla</small></div>
+            <label class="switch"><input type="checkbox" data-dkey="fullscreen" aria-label="Pantalla completa"><span></span></label>
+          </div>
+          <div class="switch-row">
+            <div><strong>Estadísticas</strong><small>Fotogramas y latencias encima de la imagen</small></div>
+            <label class="switch"><input type="checkbox" data-dkey="stats" aria-label="Estadísticas"><span></span></label>
+          </div>
+        </div>
+        <div class="device-info">
+          <div class="tiles">
+            <div class="tile main" data-t="e2e"><span>Latencia total</span><b>—</b><small></small></div>
+            <div class="tile" data-t="net"><span>Red</span><b>—</b><small></small></div>
+            <div class="tile" data-t="rtt"><span>Ida y vuelta</span><b>—</b><small></small></div>
+            <div class="tile" data-t="dec"><span>Decodificación</span><b>—</b><small></small></div>
+            <div class="tile" data-t="enc"><span>Captura → codificado</span><b>—</b><small></small></div>
+            <div class="tile" data-t="fps"><span>Fotogramas</span><b>—</b><small></small></div>
+            <div class="tile" data-t="mbps"><span>Velocidad</span><b>—</b><small></small></div>
+            <div class="tile" data-t="drop"><span>Descartados</span><b>—</b><small></small></div>
+          </div>
+          <dl class="kv" data-f="kv"></dl>
+          <div class="note" data-f="exact" hidden>
+            <span data-f="exact-text"></span>
+            <button type="button" class="btn small primary" data-act="registerResolution">Registrar resolución exacta</button>
+          </div>
+        </div>
+      </div>
+    </article>
+  </template>
 
   <div id="toast" role="status" hidden></div>
   <script type="module" src="/panel.js"></script>

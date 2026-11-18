@@ -3,7 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Configurar dispositivo</title>
+  <title>Configurar dispositivo · XtendedView</title>
+  <link rel="icon" href="/favicon.ico" sizes="any">
   <link rel="stylesheet" href="/style.css">
   <style>
     html, body { overflow: auto; -webkit-user-select: text; user-select: text; }
@@ -20,7 +21,8 @@
 </head>
 <body>
 <main>
-  <h1>Configurar este dispositivo</h1>
+  <img class="gate-icon" src="/icon-192.png" alt="" width="56" height="56">
+  <h1>Configurar este dispositivo para XtendedView</h1>
   <p class="sub">El visor necesita HTTPS para decodificar vídeo con el navegador. El portátil usa su propio
     certificado, así que hay que confiar en él una vez por dispositivo.</p>
 
@@ -42,7 +44,7 @@
     <ol>
       <li>Ajustes → <b>Seguridad y privacidad</b> → <b>Más ajustes de seguridad</b> →
         <b>Instalar desde almacenamiento del dispositivo</b> → <b>Certificado de CA</b>.</li>
-      <li>Acepta el aviso y elige <code>pantalla-secundaria-ca.crt</code> en Descargas.</li>
+      <li>Acepta el aviso y elige <code>xtendedview-ca.crt</code> en Descargas.</li>
     </ol>
     <p><b>iPad / iPhone (Safari):</b></p>
     <ol>
@@ -50,7 +52,7 @@
       <li>Ajustes → <b>Perfil descargado</b> → <b>Instalar</b>.</li>
       <li>Ajustes → General → Información → <b>Ajustes de confianza de certificados</b> → actívalo.</li>
     </ol>
-    <p class="sub">Aparecerá como «Pantalla secundaria - CA local …». Solo vale para direcciones privadas
+    <p class="sub">Aparecerá como «XtendedView - CA local …». Solo vale para direcciones privadas
       (las de tu red local), no para ninguna web de internet. Comprueba que la huella coincide con la
       del ordenador:</p>
     <p class="fp" id="fp">…</p>
@@ -58,7 +60,8 @@
 
   <h2>¿Tenías instalado un certificado anterior?</h2>
   <div class="box">
-    <p>Los de versiones anteriores se llamaban «Pantalla PoC CA (…)» y no tenían esa limitación: bórralo.</p>
+    <p>Los de versiones anteriores se llamaban «Pantalla PoC CA (…)» o «Pantalla secundaria - CA local …»:
+      bórralo, ya no sirve (y el primero no tenía la limitación a direcciones privadas).</p>
     <ul>
       <li><b>Android:</b> Ajustes → Seguridad y privacidad → Más ajustes de seguridad →
         <b>Ver certificados de seguridad</b> → pestaña <b>Usuario</b> → tócalo → <b>Eliminar</b>.</li>

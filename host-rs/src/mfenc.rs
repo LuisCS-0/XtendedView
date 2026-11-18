@@ -109,6 +109,8 @@ impl Encoder {
             let _ = set(&CODECAPI_AVEncMPVDefaultBPictureCount, VARIANT::from(0u32));
             // Keyframes bajo demanda: el periódico solo como red de seguridad (cada 10 s).
             let _ = set(&CODECAPI_AVEncMPVGOPSize, VARIANT::from(fps * 10));
+            // Medido (2026-11-18): 0 (velocidad) frente a 50 apenas cambia la latencia en este
+            // portátil (10,3 frente a 10,7 ms), así que se deja el equilibrio por defecto.
             let _ = set(&CODECAPI_AVEncCommonQualityVsSpeed, VARIANT::from(50u32));
 
             // 4. Tipos de salida (H.264) y de entrada (NV12). La salida va primero.
@@ -159,22 +161,14 @@ impl Encoder {
         }
     }
 
-    /// Bloquea hasta el siguiente evento del codificador.
-    pub fn next_event(&self) -> Result<EncEvent> {
-        Ok(self.get_event(false)?.unwrap_or(EncEvent::Other))
-    }
-
-    /// Siguiente evento si ya hay uno pendiente, sin esperar.
+    /// Siguiente evento si ya hay uno pendiente, sin esperar (la captura atiende a varios
+    /// codificadores a la vez, así que no puede quedarse bloqueada en uno).
     pub fn try_event(&self) -> Result<Option<EncEvent>> {
-        self.get_event(true)
-    }
-
-    fn get_event(&self, no_wait: bool) -> Result<Option<EncEvent>> {
         unsafe {
-            let flags = MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(no_wait as u32); // 1 = MF_EVENT_FLAG_NO_WAIT
+            let flags = MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(1); // MF_EVENT_FLAG_NO_WAIT
             let ev = match self.events.GetEvent(flags) {
                 Ok(ev) => ev,
-                Err(e) if no_wait && e.code() == MF_E_NO_EVENTS_AVAILABLE => return Ok(None),
+                Err(e) if e.code() == MF_E_NO_EVENTS_AVAILABLE => return Ok(None),
                 Err(e) => return Err(e).context("GetEvent"),
             };
             let t = ev.GetType()?;

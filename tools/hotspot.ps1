@@ -89,7 +89,7 @@ if ($ips) {
 }
 Write-Host ''
 Write-Host '  Si el móvil no carga la página, permite el host en redes públicas en el Firewall de Windows.'
-Write-Host '  (Con el host en Rust no hace falta este script: usa pantalla-host.exe --hotspot.)'
+Write-Host '  (Con el host en Rust no hace falta este script: usa xtendedview.exe --hotspot.)'
 Write-Host '  Ctrl+C para cerrar la red.'
 
 try {

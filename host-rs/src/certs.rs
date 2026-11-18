@@ -22,6 +22,10 @@ use std::fs;
 use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 
+/// Nombre de la CA tal como aparece en la lista de certificados del dispositivo (le sigue un
+/// identificador al azar).
+const CA_NAME: &str = "XtendedView - CA local";
+
 /// IP habitual del portátil cuando comparte su propia red Wi-Fi.
 pub const HOTSPOT_IPS: [Ipv4Addr; 1] = [Ipv4Addr::new(192, 168, 137, 1)];
 
@@ -118,12 +122,13 @@ impl CertManager {
         s
     }
 
-    /// La CA guardada ya tiene las restricciones (las de versiones anteriores no).
+    /// La CA guardada es la actual: con las restricciones y el nombre de XtendedView (las de
+    /// versiones anteriores no tienen una cosa o la otra).
     fn ca_is_current(&self) -> bool {
         fs::read_to_string(&self.ca_crt)
             .ok()
             .and_then(|pem| CertificateParams::from_ca_cert_pem(&pem).ok())
-            .is_some_and(|p| p.name_constraints.is_some())
+            .is_some_and(|p| p.name_constraints.is_some() && format!("{:?}", p.distinguished_name).contains(CA_NAME))
     }
 
     /// Crea lo que falte. Devuelve true si el certificado del servidor ha cambiado.
@@ -132,8 +137,8 @@ impl CertManager {
         if !exists || !self.ca_is_current() {
             if exists {
                 log::warn!(
-                    "Se rehace la CA del ordenador (ahora limitada a direcciones privadas y sin el nombre \
-                     del equipo). Hay que volver a instalarla en los dispositivos y borrar la anterior."
+                    "Se rehace la CA del ordenador («{CA_NAME} …», limitada a direcciones privadas). \
+                     Hay que volver a instalarla en los dispositivos y borrar la anterior."
                 );
             }
             self.create_ca()?;
@@ -170,7 +175,7 @@ impl CertManager {
         const ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
         let mut rng = rand::thread_rng();
         let id: String = (0..4).map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char).collect();
-        p.distinguished_name.push(DnType::CommonName, format!("Pantalla secundaria - CA local {id}"));
+        p.distinguished_name.push(DnType::CommonName, format!("{CA_NAME} {id}"));
         p.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
         p.name_constraints = Some(name_constraints());
         p.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
@@ -195,7 +200,7 @@ impl CertManager {
         let mut p = CertificateParams::default();
         // Solo direcciones (y localhost): el nombre del equipo no, porque se ve al conectarse y
         // porque la CA no permite otros nombres.
-        p.distinguished_name.push(DnType::CommonName, "Pantalla secundaria");
+        p.distinguished_name.push(DnType::CommonName, "XtendedView");
         p.subject_alt_names.push(SanType::DnsName("localhost".try_into()?));
         for ip in ips {
             p.subject_alt_names.push(SanType::IpAddress(IpAddr::V4(*ip)));
@@ -266,7 +271,7 @@ mod tests {
         assert!(matches!(ca.is_ca, IsCa::Ca(BasicConstraints::Constrained(0))));
         assert_eq!(ca.name_constraints, Some(name_constraints()));
         let ca_name = format!("{:?}", ca.distinguished_name);
-        assert!(ca_name.contains("CA local") && !ca_name.contains(&hostname()), "{ca_name}");
+        assert!(ca_name.contains(CA_NAME) && !ca_name.contains(&hostname()), "{ca_name}");
         let leaf = CertificateParams::from_ca_cert_pem(&fs::read_to_string(&cm.crt).unwrap()).unwrap();
         for san in &leaf.subject_alt_names {
             match san {

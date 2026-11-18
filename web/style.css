@@ -130,6 +130,7 @@ html, body {
 }
 
 h1 { margin: 0; font-size: 20px; }
+.gate-icon { display: block; width: 56px; height: 56px; margin-bottom: 10px; }
 .sub { margin: 2px 0 12px; color: var(--muted); font-size: 13px; }
 .status { margin: 0 0 14px; color: var(--muted); }
 .warn { margin: 0 0 14px; color: var(--warn); }

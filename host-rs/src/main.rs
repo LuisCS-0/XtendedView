@@ -1,4 +1,5 @@
-//! Pantalla secundaria: host en Rust.
+//! XtendedView: usa un móvil, una tablet o cualquier dispositivo con navegador como pantalla
+//! de este ordenador.
 //!
 //! Desktop Duplication → procesador de vídeo D3D11 (BGRA→NV12) → QuickSync (Media Foundation)
 //! → WebSocket sobre HTTPS → navegador (WebCodecs). La imagen no sale de la GPU hasta que el
@@ -23,6 +24,7 @@ use clap::Parser;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use windows::Win32::Media::timeBeginPeriod;
+use windows::Win32::System::Console::SetConsoleTitleW;
 use windows::Win32::System::Threading::{
     GetCurrentProcess, ProcessPowerThrottling, SetProcessInformation, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
     PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
@@ -54,7 +56,7 @@ fn tune_process() {
 }
 
 #[derive(Parser, Clone, Debug)]
-#[command(about = "Host de pantalla secundaria (captura y codificación en la GPU)")]
+#[command(about = "XtendedView: un móvil, una tablet u otro dispositivo con navegador como pantalla de este ordenador")]
 pub struct Args {
     /// Puerto HTTPS (visor).
     #[arg(long, default_value_t = 8443)]
@@ -117,7 +119,7 @@ fn find_root(explicit: Option<PathBuf>) -> Result<PathBuf> {
 
 fn print_banner(app: &server::App, monitor: &capture::OutputInfo, vdd: &Result<u32, String>) {
     let line = "=".repeat(66);
-    println!("{line}\n Pantalla secundaria - host en Rust\n{line}");
+    println!("{line}\n XtendedView\n{line}");
     println!(" Monitor principal : {} {}x{} ({})", monitor.name, monitor.rect.w, monitor.rect.h, monitor.adapter);
     println!(" Codificación      : QuickSync por Media Foundation, sin copias (GPU)");
     match vdd {
@@ -152,11 +154,29 @@ async fn main() -> Result<()> {
     unsafe {
         // Píxeles físicos en toda la API de Windows (captura, coordenadas del táctil…).
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        let _ = SetConsoleTitleW(windows::core::w!("XtendedView"));
     }
     tune_process();
     if args.list {
+        println!("Monitores:");
         for o in capture::outputs()? {
-            println!("{}: {} {}x{} en ({}, {}) - {}", o.index, o.name, o.rect.w, o.rect.h, o.rect.x, o.rect.y, o.adapter);
+            println!("  {}: {} {}x{} en ({}, {}) - {}", o.index, o.name, o.rect.w, o.rect.h, o.rect.x, o.rect.y, o.adapter);
+        }
+        println!("Tarjetas de red conectadas:");
+        let ifs = sys::interfaces();
+        for i in &ifs {
+            let ips: Vec<String> = i.ipv4.iter().map(|(ip, p)| format!("{ip}/{p}")).collect();
+            let mut tags = vec![if i.hardware { "física" } else { "virtual" }];
+            if i.gateway {
+                tags.push("con salida a internet");
+            }
+            if i.is_cable() {
+                tags.push("CABLE");
+            }
+            println!("  {} ({}): {} · métrica {} · {}", i.name, i.description, ips.join(", "), i.metric, tags.join(", "));
+            if i.is_cable() {
+                println!("    → internet por el cable: {:?}", sys::cable_route(&ifs, i));
+            }
         }
         return Ok(());
     }
@@ -166,10 +186,10 @@ async fn main() -> Result<()> {
     certs.ensure()?;
     let key = prefs::pairing_key(&data, false)?;
     let mut settings = prefs::Prefs::load(&prefs::path(&data));
-    if args.hotspot && settings.network != "own" {
-        settings.network = "own".into();
-        settings.save(&prefs::path(&data));
+    if args.hotspot && !settings.has("own") {
+        settings.set_connection("own", true);
     }
+    settings.save(&prefs::path(&data)); // también pasa los ajustes de versiones anteriores al formato nuevo
     let outputs = capture::outputs()?;
     let monitor = outputs
         .iter()
@@ -191,9 +211,11 @@ async fn main() -> Result<()> {
     tokio::spawn(app.clone().watch_ips());
     tokio::spawn(app.clone().touch_keepalive());
     tokio::spawn(app.clone().hotspot_watchdog());
+    tokio::spawn(app.clone().cable_watch());
     tokio::spawn(announce_new_addresses(args.port));
     if !args.no_panel {
         sys::open_app_window(&app.panel_url());
+        sys::keep_panel_icon("XtendedView"); // el título de panel.html
     }
     tokio::join!(server::serve(app.clone(), https), server::serve(app, http));
     Ok(())

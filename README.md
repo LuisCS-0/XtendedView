@@ -1,4 +1,4 @@
-# Pantalla secundaria: prueba de concepto
+# XtendedView
 
 Usa un móvil, una tablet u otro PC como pantalla del portátil desde el **navegador**, sin
 instalar nada en el dispositivo. Este programa corre en el portátil y hace lo siguiente:
@@ -11,25 +11,41 @@ captura (Desktop Duplication) → H.264 (QuickSync) → WebSocket sobre HTTPS �
 
 ## Uso
 
-1. Arranca `host-rs\target\release\pantalla-host.exe` desde la carpeta del proyecto. Se abre el
+1. Arranca `host-rs\target\release\xtendedview.exe` desde la carpeta del proyecto. Se abre el
    **panel de control** en una ventana (también en `http://localhost:8080/panel`).
-2. Pulsa el **botón de encendido**. Cada encendido crea un **código de emparejamiento nuevo**, así
-   que hay que volver a escanear el QR. Mientras está apagada, ningún dispositivo puede conectarse,
-   no hay red propia ni monitor virtual. El botón **Apagar** de arriba lo detiene todo.
-3. En el panel, elige la red (la del ordenador o una red Wi-Fi propia, sin router) y pulsa
-   **Aplicar**. Elige también el modo (pantalla adicional o espejo). Para la pantalla adicional,
-   indica en qué lado del ordenador tienes el dispositivo.
-4. En el móvil o la tablet, **escanea con la cámara el código QR** del panel. Con red propia hay
+2. Elige cómo conectar: **Red del ordenador**, **Red propia** (el ordenador crea su Wi-Fi, sin
+   router) o **Cable USB** (experimental). Al elegir, se enciende. Cada encendido crea un **código de
+   emparejamiento nuevo**, así que hay que volver a escanear el QR. Mientras está apagada, ningún
+   dispositivo puede conectarse, no hay red propia ni monitor virtual. El botón **Apagar** de arriba
+   lo detiene todo.
+3. En el móvil o la tablet, **escanea con la cámara el código QR** del panel. Con red propia hay
    dos: el primero une el dispositivo a la red y el segundo abre la pantalla.
+4. **Acepta la conexión en el panel.** Cada dispositivo que llega aparece arriba con su nombre, su
+   dirección y por dónde llega, con **Aceptar** y **Rechazar** (la ventana del panel parpadea en la
+   barra de tareas). Si no se acepta en 90 s, se rechaza solo. Un dispositivo ya aceptado no vuelve a
+   preguntar hasta que apagues (al reconectar tras un corte o al recargar la página).
 
-El dispositivo solo muestra la pantalla, sin menús. Todo se ajusta desde el panel del ordenador:
+### Varios dispositivos a la vez
 
-- **Pantalla completa** en el dispositivo. El navegador pide un toque para activarla.
-- **Fotogramas, calidad y resolución.**
-- **Estadísticas** encima de la imagen y **medición de la latencia**.
-- **Información de la conexión:** latencias, fotogramas, velocidad, resolución, codificador…
-- **Resolución exacta:** un botón la registra en el driver, con el aviso de administrador de Windows.
-- **Desconectar el dispositivo** y **cambiar el código de emparejamiento**.
+Hasta 4, cada uno con sus propios ajustes, que se guardan para la próxima vez (el navegador de cada
+dispositivo guarda un identificador):
+
+- **Pantalla adicional o espejo**, cada uno por su lado: dos pantallas adicionales, una adicional y
+  otra en espejo, dos en espejo del mismo monitor… Cada pantalla adicional tiene su monitor virtual,
+  en el lado elegido; un dispositivo nuevo va a un lado libre, y dos en el mismo lado se colocan uno
+  tras otro.
+- **Fotogramas, calidad, resolución, pantalla completa y estadísticas** por dispositivo.
+- **Por la conexión que quiera:** en la tarjeta «Conexiones» se activan por separado la red del
+  ordenador, la red propia y el cable, y puede haber varias a la vez (por ejemplo, la tablet por la red
+  propia y el móvil por cable). Solo se aceptan dispositivos por las conexiones activas.
+
+Windows solo deja capturar cada monitor una vez por programa: si dos dispositivos duplican el mismo,
+comparten la captura y cada uno recibe la imagen a su tamaño, fotogramas y calidad.
+
+El dispositivo solo muestra la pantalla, sin menús. Todo se ajusta desde el panel del ordenador,
+en la tarjeta de cada dispositivo: modo, lado o monitor, fotogramas, calidad, resolución, pantalla
+completa, estadísticas, sus medidas (latencias, fotogramas, velocidad, codificador), registrar la
+resolución exacta y desconectarlo. En la parte general: medir la latencia y cambiar el código.
 
 Los ajustes se guardan en `certs\ajustes.json`. Al encender, la consola del host también muestra
 el código QR. Con `--no-panel` no se abre la ventana del panel; con `--start` arranca ya
@@ -55,8 +71,11 @@ adicional solo están en la de Rust:
 
 ```
 cargo build --release --manifest-path host-rs\Cargo.toml
-host-rs\target\release\pantalla-host.exe
+host-rs\target\release\xtendedview.exe
 ```
+
+Para compilar hace falta el SDK de Windows (viene con las herramientas de compilación de Visual
+Studio que usa Rust): de él sale `rc.exe`, que mete el icono en el ejecutable.
 
 Hay que lanzarlo desde la carpeta del proyecto, o indicarla con `--root`, para que encuentre `web\`
 y `certs\`. Comparte el certificado con la versión Python (los dos crean la misma CA limitada).
@@ -174,7 +193,7 @@ comprobación independiente.
 Con el host en Rust:
 
 ```
-host-rs\target\release\pantalla-host.exe --hotspot
+host-rs\target\release\xtendedview.exe --hotspot
 ```
 
 (o elige «Red propia» en el panel y pulsa Aplicar; la red se crea al encender).
@@ -195,6 +214,33 @@ tiene internet: elige mantener la conexión.
 Si el portátil sigue conectado a otra Wi-Fi, la tarjeta tiene que repartirse entre las dos y puede
 haber más variación de latencia. Para medir lo mejor posible, desconéctala.
 
+## Por cable (Android, anclaje USB) — experimental
+
+Funciona y es la opción con menos latencia (con el Fold: 34 ms en total frente a 53–68 por Wi-Fi), pero
+de momento solo para dispositivos con anclaje USB y hay que activarlo a mano cada vez, así que en el
+panel aparece como experimental.
+
+El navegador del móvil no puede usar el USB directamente, así que el cable crea una pequeña red entre
+los dos equipos con el **anclaje USB** de Android. Para el navegador es lo mismo que una Wi-Fi, pero
+sin interferencias: la red tarda menos de 1 ms y no da tirones.
+
+1. En la pantalla de inicio, elige **Cable USB** (o, ya encendida, «Cable USB» y Aplicar; si conectas
+   el móvil estando en otra red, el panel ofrece pasar al cable).
+2. Conecta el móvil con un cable USB de datos y actívalo en el móvil: Ajustes → Conexiones →
+   Conexión compartida y Módem → **Módem USB** (en Samsung; en otros Android, «Compartir conexión
+   por USB» o «Anclaje de USB»). Windows ya trae el driver.
+3. En cuanto el ordenador ve la tarjeta del cable, el panel muestra el QR con su dirección en esa red.
+
+Con el anclaje, el móvil comparte también su internet, y Windows suele preferirlo a la Wi-Fi, así que
+el ordenador gastaría los datos del móvil. El panel lo detecta y ofrece **Usar la Wi-Fi para
+internet** (aviso de administrador): sube la métrica de esa tarjeta para que Windows prefiera la
+Wi-Fi. Windows lo recuerda para esa tarjeta y, si no hay otra conexión, sigue pudiendo usar el
+móvil.
+
+En modo cable solo se aceptan dispositivos que lleguen por el cable. También reconoce un cable de red
+directo (adaptador USB-C a Ethernet en un iPad u otro ordenador, sin router), aunque eso aún no está
+probado. `xtendedview.exe --list` muestra las tarjetas de red y cuál toma como cable.
+
 ## Seguridad
 
 Pensado para usarlo también en sitios públicos:
@@ -204,10 +250,14 @@ Pensado para usarlo también en sitios públicos:
 - **Red propia**: nombre y contraseña aleatorios en cada encendido. El nombre tiene el formato de
   Wi-Fi Direct (`DIRECT-…`, como impresoras y teles), así que no dice de quién es el ordenador ni
   deja seguirlo de un sitio a otro. La contraseña tiene 16 caracteres (80 bits), suficiente aunque
-  alguien capture la conexión e intente adivinarla después. Solo se aceptan dispositivos de esa red:
-  si el portátil sigue en la Wi-Fi de una cafetería, los equipos de esa red no pueden conectarse.
-- **Red del ordenador**: cualquiera de esa red llega al host, y lo protege el código de
-  emparejamiento. En una Wi-Fi pública es mejor la red propia.
+  alguien capture la conexión e intente adivinarla después.
+- **Solo por las conexiones activas**: cada conexión llega por su tarjeta (la red propia, la del
+  cable o la del ordenador). Si solo está activa la red propia, por ejemplo, los equipos de la Wi-Fi
+  de una cafetería en la que siga el portátil no pueden ni conectarse.
+- **Red del ordenador**: cualquiera de esa red llega al host, y lo protegen el código y la
+  aceptación en el panel. En una Wi-Fi pública es mejor la red propia o el cable.
+- **Aceptar cada dispositivo**: aunque alguien tenga el código, no ve nada hasta que lo aceptes en
+  el panel. Los aceptados se olvidan al apagar.
 - **Código de emparejamiento**: 8 caracteres (31⁸ combinaciones), nuevo en cada encendido. Se
   comprueba un intento cada vez y cada fallo hace esperar un segundo, aunque se abran muchas
   conexiones a la vez (como mucho un intento fallido por segundo).
@@ -218,11 +268,12 @@ Pensado para usarlo también en sitios públicos:
   direcciones privadas y a `localhost` (restricciones de nombre críticas, comprobadas con OpenSSL y
   con Windows). Aunque alguien robara su clave de `certs\`, no le serviría para suplantar ninguna web
   de internet en esos dispositivos. Tampoco puede crear otras CA y no lleva el nombre del equipo:
-  se llama «Pantalla secundaria - CA local XXXX», con un identificador al azar.
+  se llama «XtendedView - CA local XXXX», con un identificador al azar.
 
-Las CA de versiones anteriores («Pantalla PoC CA (equipo)») no tenían estas restricciones. El host
-las rehace solo al arrancar, así que hay que **volver a instalar el certificado** desde `/setup` y
-**borrar el anterior** de cada dispositivo. La página `/setup` explica cómo.
+Las CA de versiones anteriores («Pantalla PoC CA (equipo)», sin restricciones, y «Pantalla secundaria
+- CA local …», con el nombre antiguo) se rehacen solas al arrancar, así que hay que **volver a
+instalar el certificado** desde `/setup` y **borrar el anterior** de cada dispositivo. La página
+`/setup` explica cómo.
 
 ## Opciones
 
@@ -235,8 +286,8 @@ las rehace solo al arrancar, así que hay que **volver a instalar el certificado
 | `--max-inflight-ms MS` | `200` | retraso acumulado a partir del cual se descartan frames en vez de acumular retraso |
 | `--port`, `--http-port` | `8443`, `8080` | puertos HTTPS y HTTP |
 
-Desde el visor se eligen los fotogramas por segundo (30–120), la calidad (10–50 Mbps) y la
-resolución (100/75/50 %).
+Estas opciones son de la versión Python. En la de Rust, los fotogramas (30–120), la calidad
+(10–50 Mbps) y la resolución (100/75/50 %) se eligen en el panel del ordenador.
 
 ## Resultados en este portátil
 
@@ -260,20 +311,29 @@ GPU. Una versión de FFmpeg con oneVPL, o una captura nativa, permitiría hacerl
 - Sin audio.
 - iPad: el mismo visor debería funcionar en Safari con iPadOS 16.4 o posterior. Ahí es mejor
   **instalar el certificado** desde `/setup` que aceptar el aviso.
-- Emparejamiento: por ahora, escribiendo la dirección. QR y Bluetooth vendrán después.
+- Cable: Android con anclaje USB; el Ethernet directo (iPad u otro PC con adaptador) aún sin probar.
+  Un iPad solo Wi-Fi no puede hacer anclaje USB: necesita el adaptador Ethernet.
 
 ## Estructura
 
 ```
 host-rs/src/       host en Rust: capture.rs (DDA y cursor), convert.rs (BGRA→NV12 en GPU),
-                   mfenc.rs (QuickSync), pipeline.rs (hilo de captura), server.rs (HTTPS/WS),
-                   vdd.rs + display.rs (monitor virtual), certs.rs, input.rs (táctil/ratón), h264.rs
+                   mfenc.rs (QuickSync), pipeline.rs (hilo de captura), server.rs (HTTPS/WS, panel,
+                   encendido y seguridad), vdd.rs + display.rs (monitor virtual), certs.rs,
+                   input.rs (táctil, ratón y lápiz), hotspot.rs (red propia), prefs.rs (ajustes),
+                   sys.rs (red, QR, ventanas), h264.rs
+host-rs/build.rs + xtendedview.rc   icono y nombre del ejecutable (con rc.exe del SDK de Windows)
+assets/            icono de XtendedView (xtendedview.png de 1024 px y xtendedview.ico) y logotipo de
+                   texto para tema oscuro y claro (logo-tema-*.png)
+tools/iconos.ps1   genera todos los iconos a partir de una imagen (después, recompilar)
+tools/logo.ps1     prepara el logotipo de texto (sobre fondo negro) para el panel
 tools/vdd-resoluciones.ps1  resoluciones propias del monitor virtual (administrador)
 host/main.py       servidor HTTPS/WebSocket, sesión del visor, control de flujo y estadísticas
 host/encoder.py    comando de FFmpeg y lectura de la salida FLV frame a frame
 host/websocket.py  WebSocket mínimo (RFC 6455)
 host/certs.py      autoridad de certificación local y certificado con las IP del portátil
 host/winapi.py     DPI, monitores e inyección de táctil/ratón (ctypes)
-web/               visor (index.html, viewer.js), sonda (probe.*), configuración (setup.html)
+web/               visor (index.html, viewer.js), panel del ordenador (panel.*), sonda (probe.*),
+                   configuración (setup.html) e iconos (favicon.ico, icon-*.png)
 tools/hotspot.ps1  red Wi-Fi directa del portátil (Wi-Fi Direct en modo legacy)
 ```

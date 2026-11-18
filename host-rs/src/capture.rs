@@ -105,6 +105,7 @@ impl Gpu {
     }
 }
 
+#[derive(Clone)]
 pub struct CursorShape {
     pub width: u32,
     pub height: u32,

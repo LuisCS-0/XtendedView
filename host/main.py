@@ -1,4 +1,4 @@
-"""Pantalla secundaria - prueba de concepto (host Windows).
+"""XtendedView - prototipo en Python (host Windows). La versión principal es la de Rust (host-rs).
 
 captura (Desktop Duplication) -> H.264 (QuickSync) -> WebSocket sobre HTTPS -> navegador (WebCodecs)
 
@@ -37,10 +37,11 @@ FRAME_HEADER = struct.Struct("<BBHIdI")
 
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
         ".css": "text/css; charset=utf-8", ".json": "application/json",
-        ".svg": "image/svg+xml", ".webmanifest": "application/manifest+json"}
+        ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon",
+        ".webmanifest": "application/manifest+json"}
 ROUTES = {"/": "index.html", "/probe": "probe.html", "/setup": "setup.html"}
 # Lo único que se sirve sin cifrar a otros dispositivos: lo necesario para instalar el certificado.
-PLAIN_HTTP_PATHS = {"/setup", "/ca.crt", "/info", "/style.css", "/icon.svg"}
+PLAIN_HTTP_PATHS = {"/setup", "/ca.crt", "/info", "/style.css", "/favicon.ico", "/icon-192.png"}
 KEY_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 
 
@@ -414,7 +415,7 @@ class Server:
         head = method == "HEAD"
         if path == "/ca.crt":
             return self.respond(writer, 200, self.certs.ca_crt.read_bytes(), "application/x-x509-ca-cert",
-                                {"Content-Disposition": 'attachment; filename="pantalla-secundaria-ca.crt"'}, head)
+                                {"Content-Disposition": 'attachment; filename="xtendedview-ca.crt"'}, head)
         if path == "/info":
             # Sin cifrar y sin código: nada del nombre del equipo ni de sus otras direcciones.
             body = json.dumps({"httpsPort": self.args.port, "httpPort": self.args.http_port,
@@ -485,7 +486,7 @@ def print_banner(args, mon: winapi.Monitor, key: str) -> None:
     ips = certs.usable_ips()
     pretty_key = f"{key[:4]}-{key[4:]}"
     print("=" * 66)
-    print(" Pantalla secundaria - prueba de concepto")
+    print(" XtendedView - prototipo en Python")
     print("=" * 66)
     print(f" Monitor capturado : {mon.name} {mon.w}x{mon.h} (modo espejo)")
     print(f" Codificador       : {args.encoder} (escalado {args.pipeline})")

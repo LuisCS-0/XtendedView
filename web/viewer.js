@@ -45,6 +45,17 @@ function takeKeyFromUrl() {
 
 const savedKey = () => normKey(storage('key') || '');
 
+/** Identificador de este dispositivo: con él, el ordenador recuerda sus ajustes (lado, modo…)
+ *  y sabe que ya lo aceptaste si la conexión se corta y vuelve. */
+function deviceId() {
+  let id = storage('device') || '';
+  if (!/^[A-Za-z0-9]{16,40}$/.test(id)) {
+    id = [...crypto.getRandomValues(new Uint8Array(12))].map((b) => b.toString(16).padStart(2, '0')).join('');
+    storage('device', id);
+  }
+  return id;
+}
+
 /** Nombre legible del dispositivo para el panel ("SM-F966B · Android · Chrome"). */
 async function deviceName() {
   const ua = navigator.userAgent;
@@ -180,7 +191,7 @@ async function detectRefresh() {
 function sendHello() {
   const { w, h } = targetSize();
   const hello = {
-    t: 'hello', key: savedKey(), w, h, hz: displayHz,
+    t: 'hello', key: savedKey(), id: deviceId(), w, h, hz: displayHz,
     dpr: window.devicePixelRatio || 1, name: st.name,
     // Para el host en Python, que no tiene panel: valores por defecto.
     fps: displayHz, bitrate: 20,
@@ -207,6 +218,8 @@ function onText(msg) {
     case 'bye': stop(msg.reason, { retry: msg.retry !== false }); break;
     case 'error': showToast(msg.message); break;
     case 'info': showToast(msg.message); break;
+    // Hay que aceptar la conexión en el panel del ordenador.
+    case 'wait': showGate(msg.message); break;
   }
 }
 

@@ -20,7 +20,7 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
 };
 
-fn create_texture(device: &ID3D11Device, w: u32, h: u32, format: DXGI_FORMAT, bind: u32) -> Result<ID3D11Texture2D> {
+pub fn create_texture(device: &ID3D11Device, w: u32, h: u32, format: DXGI_FORMAT, bind: u32) -> Result<ID3D11Texture2D> {
     let desc = D3D11_TEXTURE2D_DESC {
         Width: w,
         Height: h,
@@ -38,12 +38,16 @@ fn create_texture(device: &ID3D11Device, w: u32, h: u32, format: DXGI_FORMAT, bi
     tex.context("CreateTexture2D")
 }
 
+/// Copia de la imagen capturada (la de DXGI hay que soltarla cuanto antes). La comparten los
+/// conversores de todos los dispositivos que muestran ese monitor.
+pub fn create_source(device: &ID3D11Device, w: u32, h: u32) -> Result<ID3D11Texture2D> {
+    create_texture(device, w, h, DXGI_FORMAT_B8G8R8A8_UNORM, (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32)
+}
+
 pub struct Converter {
     vctx: ID3D11VideoContext,
     vp: ID3D11VideoProcessor,
     input_view: ID3D11VideoProcessorInputView,
-    /// Copia de la imagen capturada (la de DXGI hay que soltarla cuanto antes).
-    pub src: ID3D11Texture2D,
     outputs: Vec<(ID3D11Texture2D, ID3D11VideoProcessorOutputView)>,
     next: usize,
     /// Último NV12 convertido: se reutiliza si hace falta un keyframe con la pantalla quieta.
@@ -52,7 +56,8 @@ pub struct Converter {
 
 impl Converter {
     /// `rotation`: giro del monitor según DXGI (DXGI_MODE_ROTATION); la imagen se endereza aquí.
-    pub fn new(gpu: &Gpu, src_w: u32, src_h: u32, dst_w: u32, dst_h: u32, fps: u32, pool: usize, rotation: i32) -> Result<Self> {
+    /// `src`: la copia compartida de la imagen capturada (ver `create_source`).
+    pub fn new(gpu: &Gpu, src: &ID3D11Texture2D, src_w: u32, src_h: u32, dst_w: u32, dst_h: u32, fps: u32, pool: usize, rotation: i32) -> Result<Self> {
         let vdev: ID3D11VideoDevice = gpu.device.cast()?;
         let vctx: ID3D11VideoContext = gpu.ctx.cast()?;
         let rate = DXGI_RATIONAL { Numerator: fps, Denominator: 1 };
@@ -69,13 +74,6 @@ impl Converter {
         let en = unsafe { vdev.CreateVideoProcessorEnumerator(&desc) }.context("CreateVideoProcessorEnumerator")?;
         let vp = unsafe { vdev.CreateVideoProcessor(&en, 0) }.context("CreateVideoProcessor")?;
 
-        let src = create_texture(
-            &gpu.device,
-            src_w,
-            src_h,
-            DXGI_FORMAT_B8G8R8A8_UNORM,
-            (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
-        )?;
         let in_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
             FourCC: 0,
             ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
@@ -84,7 +82,7 @@ impl Converter {
             },
         };
         let mut input_view = None;
-        unsafe { vdev.CreateVideoProcessorInputView(&src, &en, &in_desc, Some(&mut input_view)) }
+        unsafe { vdev.CreateVideoProcessorInputView(src, &en, &in_desc, Some(&mut input_view)) }
             .context("CreateVideoProcessorInputView")?;
 
         let out_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
@@ -134,7 +132,6 @@ impl Converter {
             vctx,
             vp,
             input_view: input_view.context("sin vista de entrada")?,
-            src,
             outputs,
             next: 0,
             last: None,

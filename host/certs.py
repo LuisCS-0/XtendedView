@@ -20,6 +20,8 @@ OPENSSL_CANDIDATES = [r"C:\Program Files\OpenSSL-Win64\bin\openssl.exe",
 # IP habitual del portátil cuando comparte su propia red Wi-Fi (zona con cobertura / Wi-Fi Direct).
 HOTSPOT_IPS = ["192.168.137.1"]
 
+# Nombre de la CA en la lista de certificados del dispositivo (le sigue un identificador al azar).
+CA_NAME = "XtendedView - CA local"
 # Redes para las que vale la CA (ninguna existe en internet). Igual que PERMITTED_V4 en Rust.
 PERMITTED_NETS = [ipaddress.ip_network(n) for n in (
     "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16", "127.0.0.0/8")]
@@ -33,7 +35,7 @@ CONFIG = """\
 distinguished_name = dn
 prompt = no
 [dn]
-CN = Pantalla secundaria - CA local {ca_id}
+CN = {ca_name} {ca_id}
 [v3_ca]
 basicConstraints = critical,CA:TRUE,pathlen:0
 keyUsage = critical,keyCertSign,cRLSign
@@ -97,8 +99,8 @@ class CertManager:
         alt += [f"IP.{i + 1} = {ip}" for i, ip in enumerate(ips)]
         ca_id = "".join(secrets.choice("ABCDEFGHJKMNPQRSTUVWXYZ23456789") for _ in range(4))
         path = self.dir / "openssl.cnf"
-        path.write_text(CONFIG.format(ca_id=ca_id, constraints=NAME_CONSTRAINTS, alt="\n".join(alt)),
-                        encoding="ascii")
+        path.write_text(CONFIG.format(ca_name=CA_NAME, ca_id=ca_id, constraints=NAME_CONSTRAINTS,
+                                      alt="\n".join(alt)), encoding="ascii")
         return path
 
     def wanted_ips(self) -> list[str]:
@@ -108,10 +110,10 @@ class CertManager:
         return sorted(ips, key=ipaddress.ip_address)
 
     def _ca_is_current(self) -> bool:
-        """La CA guardada ya tiene las restricciones (las de versiones anteriores no)."""
+        """La CA guardada es la actual: con las restricciones y el nombre de XtendedView."""
         r = subprocess.run([self.openssl, "x509", "-in", str(self.ca_crt), "-noout", "-text"],
                            capture_output=True, text=True)
-        return r.returncode == 0 and "Name Constraints" in r.stdout
+        return r.returncode == 0 and "Name Constraints" in r.stdout and CA_NAME in r.stdout
 
     def ensure(self) -> bool:
         """Crea lo que falte. Devuelve True si el certificado del servidor ha cambiado."""
@@ -135,7 +137,7 @@ class CertManager:
         cnf = self._config(ips)
         csr = self.dir / "server.csr"
         self._run("req", "-new", "-config", str(cnf), "-newkey", "ec",
-                  "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-subj", "/CN=Pantalla secundaria",
+                  "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-subj", "/CN=XtendedView",
                   "-keyout", str(self.key), "-out", str(csr))
         self._run("x509", "-req", "-in", str(csr), "-CA", str(self.ca_crt),
                   "-CAkey", str(self.ca_key), "-set_serial", "0x" + secrets.token_hex(12),
