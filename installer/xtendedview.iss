@@ -10,6 +10,12 @@
 #endif
 #define Root ".."
 #define Exe "xtendedview.exe"
+; Driver de monitores virtuales (para «Pantalla adicional»). Es de Parsec, con su licencia: no se
+; incluye, se descarga de su web si se marca la casilla. Huella SHA-256 del instalador oficial
+; 0.41.0.0 (firmado por Parsec Cloud, Inc.): si lo descargado no coincide, no se ejecuta.
+#define VddUrl "https://builds.parsec.app/vdd/parsec-vdd-0.41.0.0.exe"
+#define VddFile "parsec-vdd-0.41.0.0.exe"
+#define VddSha256 "317977c5abd58f1c3f7b27ef7f96947efd07e6d35b27e415cea5daa6007629b1"
 
 [Setup]
 AppId={{6B0C1C3E-7F5A-4E2B-9C7D-58A2B3E4F901}
@@ -35,6 +41,8 @@ WizardSizePercent=110
 Compression=lzma2/max
 SolidCompression=yes
 CloseApplications=no
+; «Abrir al iniciar sesión» va en HKCU: el del usuario que instala, que es quien lo usa.
+UsedUserAreasWarning=no
 
 [Languages]
 Name: "es"; MessagesFile: "compiler:Languages\Spanish.isl"
@@ -42,6 +50,9 @@ Name: "es"; MessagesFile: "compiler:Languages\Spanish.isl"
 [Tasks]
 Name: "desktopicon"; Description: "Crear un acceso directo en el escritorio"; GroupDescription: "Accesos directos:"
 Name: "autostart"; Description: "Abrir XtendedView al iniciar sesión (se queda junto al reloj, sin abrir el panel)"; GroupDescription: "Inicio:"; Flags: unchecked
+; Solo si aún no está instalado. Sin él, los dispositivos solo pueden usarse en espejo.
+Name: "vdd"; Description: "Instalar también el driver de pantalla adicional (Parsec VDD). Se descarga de la web de Parsec y se instala con su propio asistente"; \
+  GroupDescription: "Pantalla adicional (para usar el dispositivo como un monitor más, no solo en espejo):"; Check: not ParsecVddInstalled
 
 [Files]
 Source: "{#Root}\host-rs\target\gui\release\{#Exe}"; DestDir: "{app}"; Flags: ignoreversion
@@ -65,6 +76,8 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
   ValueData: """{app}\{#Exe}"" --no-panel"; Flags: uninsdeletevalue; Tasks: autostart
 
 [Run]
+; El driver de Parsec, con su asistente (y su licencia), si se descargó bien.
+Filename: "{tmp}\{#VddFile}"; StatusMsg: "Instalando el driver de pantalla adicional de Parsec…"; Check: VddDownloaded; Flags: waituntilterminated
 ; Los dispositivos se conectan a este ordenador. Todos los perfiles: la red propia de Windows
 ; aparece como red pública. El propio programa solo acepta conexiones con la pantalla encendida,
 ; por las conexiones activas, con el código de emparejamiento y aceptándolas en el panel.
@@ -78,6 +91,57 @@ Filename: "{sys}\taskkill.exe"; Parameters: "/IM {#Exe} /F"; Flags: runhidden; R
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""XtendedView"""; Flags: runhidden; RunOnceId: "Cortafuegos"
 
 [Code]
+var
+  DownloadPage: TDownloadWizardPage;
+  Downloaded: Boolean;
+
+// El driver de Parsec ya está instalado (su desinstalador se registra en la vista de 32 bits).
+function ParsecVddInstalled: Boolean;
+begin
+  Result := RegKeyExists(HKLM32, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\ParsecVDD') or
+            RegKeyExists(HKLM64, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\ParsecVDD');
+end;
+
+function VddDownloaded: Boolean;
+begin
+  Result := Downloaded;
+end;
+
+procedure InitializeWizard;
+begin
+  DownloadPage := CreateDownloadPage(SetupMessage(msgWizardPreparing),
+    'Descargando el driver de pantalla adicional de la web de Parsec…', nil);
+end;
+
+// Al pulsar «Instalar», si se marcó la casilla, se descarga el driver (comprobando su huella).
+// Si falla (sin internet, por ejemplo), XtendedView se instala igual y el driver se puede
+// instalar después desde el panel.
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  if (CurPageID = wpReady) and WizardIsTaskSelected('vdd') then
+  begin
+    DownloadPage.Clear;
+    DownloadPage.Add('{#VddUrl}', '{#VddFile}', '{#VddSha256}');
+    DownloadPage.Show;
+    try
+      try
+        DownloadPage.Download;
+        Downloaded := True;
+      except
+        if DownloadPage.AbortedByUser then
+          Log('Descarga del driver cancelada')
+        else
+          MsgBox('No se pudo descargar el driver de Parsec:' + #13#10 + GetExceptionMessage + #13#10#13#10 +
+            'XtendedView se instalará igualmente. Podrás instalar el driver más tarde desde el panel ' +
+            '(Ajustes → Pantalla adicional).', mbInformation, MB_OK);
+      end;
+    finally
+      DownloadPage.Hide;
+    end;
+  end;
+end;
+
 // Si está abierto, se cierra antes de sustituir el ejecutable (al actualizar).
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var

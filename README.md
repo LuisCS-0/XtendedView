@@ -25,6 +25,12 @@ El instalador (pide permiso de administrador):
 - Permite las conexiones entrantes de XtendedView en el cortafuegos, en todos los perfiles: la red
   propia aparece en Windows como red pública. El programa, igualmente, solo acepta dispositivos
   encendido, por las conexiones activas, con el código y aceptándolos en el panel.
+- Si no está instalado el driver de monitores virtuales **Parsec VDD** (necesario para «Pantalla
+  adicional»; sin él, los dispositivos solo pueden usarse en espejo), ofrece una casilla para
+  instalarlo también. No va incluido, porque es de Parsec con su propia licencia: se descarga de su
+  web, solo se ejecuta si su huella SHA-256 coincide con la del instalador oficial 0.41.0.0 y se
+  instala con su propio asistente. Si la descarga falla, XtendedView se instala igual y el driver
+  se puede instalar después desde el panel (Ajustes → Pantalla adicional).
 - Al desinstalar, pregunta si borrar también los ajustes y certificados.
 
 El mismo guion genera también la **versión portátil**, `dist\XtendedView-<versión>-portable.zip`: se
