@@ -16,6 +16,8 @@
 #define VddUrl "https://builds.parsec.app/vdd/parsec-vdd-0.41.0.0.exe"
 #define VddFile "parsec-vdd-0.41.0.0.exe"
 #define VddSha256 "317977c5abd58f1c3f7b27ef7f96947efd07e6d35b27e415cea5daa6007629b1"
+#define VddGroup "Pantalla adicional (para usar el dispositivo como un monitor más, no solo en espejo):"
+#define VddOkText "El driver de pantalla adicional (Parsec VDD) ya está instalado en este ordenador"
 
 [Setup]
 AppId={{6B0C1C3E-7F5A-4E2B-9C7D-58A2B3E4F901}
@@ -52,7 +54,9 @@ Name: "desktopicon"; Description: "Crear un acceso directo en el escritorio"; Gr
 Name: "autostart"; Description: "Abrir XtendedView al iniciar sesión (se queda junto al reloj, sin abrir el panel)"; GroupDescription: "Inicio:"; Flags: unchecked
 ; Solo si aún no está instalado. Sin él, los dispositivos solo pueden usarse en espejo.
 Name: "vdd"; Description: "Instalar también el driver de pantalla adicional (Parsec VDD). Se descarga de la web de Parsec y se instala con su propio asistente"; \
-  GroupDescription: "Pantalla adicional (para usar el dispositivo como un monitor más, no solo en espejo):"; Check: not ParsecVddInstalled
+  GroupDescription: "{#VddGroup}"; Check: not ParsecVddInstalled
+; Si ya está instalado, solo se dice (marcada y sin poder tocarla, ver CurPageChanged): no hace nada.
+Name: "vddok"; Description: "{#VddOkText}"; GroupDescription: "{#VddGroup}"; Check: ParsecVddInstalled
 
 [Files]
 Source: "{#Root}\host-rs\target\gui\release\{#Exe}"; DestDir: "{app}"; Flags: ignoreversion
@@ -105,6 +109,20 @@ end;
 function VddDownloaded: Boolean;
 begin
   Result := Downloaded;
+end;
+
+// La línea «ya está instalado» se queda marcada y sin poder desmarcarse: es solo un aviso.
+procedure CurPageChanged(CurPageID: Integer);
+var
+  I: Integer;
+begin
+  if CurPageID = wpSelectTasks then
+    for I := 0 to WizardForm.TasksList.Items.Count - 1 do
+      if WizardForm.TasksList.ItemCaption[I] = '{#VddOkText}' then
+      begin
+        WizardForm.TasksList.Checked[I] := True;
+        WizardForm.TasksList.ItemEnabled[I] := False;
+      end;
 end;
 
 procedure InitializeWizard;
