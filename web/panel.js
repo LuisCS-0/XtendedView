@@ -649,11 +649,15 @@ function renderConnections(s) {
   }
 }
 
-/** Sección Ajustes. */
-function renderSettings(s) {
+/** El tema guardado (también con la pantalla apagada, en la pantalla de inicio). */
+function syncTheme(s) {
   // Recién elegido en este panel: hasta que el programa lo confirme, se mantiene.
   if (themeSent && s.prefs.theme === themeSent) themeSent = null;
   if (!themeSent && s.prefs.theme !== theme) applyTheme(s.prefs.theme);
+}
+
+/** Sección Ajustes. */
+function renderSettings(s) {
   setValue($('#quit-on-close'), s.prefs.quitOnClose);
   const blocked = s.blocked || [];
   $('#no-blocked').hidden = blocked.length > 0;
@@ -765,6 +769,7 @@ function renderDevices(s) {
 function render(s = last) {
   if (!s) return;
   last = s;
+  syncTheme(s);
   renderPower(s);
   if (!s.on) {
     if (busy.power === true) setStatus('wait', 'Encendiendo…', 'Preparando la conexión');

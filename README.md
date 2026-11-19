@@ -1,325 +1,311 @@
-# XtendedView
+<div align="center">
 
-Usa un móvil, una tablet u otro PC como pantalla del portátil desde el **navegador**, sin
-instalar nada en el dispositivo. Este programa corre en el portátil y hace lo siguiente:
+<img src="assets/xtendedview.png" alt="" width="128">
 
-```
-captura (Desktop Duplication) → H.264 (QuickSync) → WebSocket sobre HTTPS → navegador (WebCodecs) → canvas
-                                       ↑                                                   │
-                       ratón / táctil inyectados en Windows  ←──────────  táctil, ratón y lápiz
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/logo-tema-oscuro.png">
+  <img src="assets/logo-tema-claro.png" alt="XtendedView" width="360">
+</picture>
 
-## Instalar (Windows)
+### Tu móvil, tu tablet o cualquier dispositivo con navegador, como una pantalla más de tu PC
 
-`tools\instalador.ps1` genera `dist\XtendedView-<versión>-instalador.exe` (hace falta Rust e
-[Inno Setup 6](https://jrsoftware.org/isdl.php)):
+Sin instalar nada en el dispositivo: escaneas un código QR y listo.
 
-```bash
-powershell -ExecutionPolicy Bypass -File tools\instalador.ps1
-```
+[![Windows 10 y 11](https://img.shields.io/badge/Windows-10%20%7C%2011-0894FE?logo=windows&logoColor=white)](#requisitos)
+[![Hecho con Rust](https://img.shields.io/badge/hecho%20con-Rust-8B1CFA?logo=rust&logoColor=white)](#compilar-desde-el-código)
+[![Licencia MIT](https://img.shields.io/badge/licencia-MIT-BD3CFA)](LICENSE)
+[![Solo navegador](https://img.shields.io/badge/dispositivo-solo%20navegador-32028E)](#requisitos)
 
-El instalador (pide permiso de administrador):
+[**Descargar**](https://github.com/LuisCS-0/XtendedView/releases/latest) ·
+[Cómo funciona](#cómo-funciona) ·
+[Primeros pasos](#primeros-pasos) ·
+[Compilar](#compilar-desde-el-código)
 
-- Instala en `Archivos de programa\XtendedView`, con acceso en el menú Inicio y, si se marca, en el
-  escritorio y al iniciar sesión (entonces arranca junto al reloj, sin abrir el panel).
-- Permite las conexiones entrantes de XtendedView en el cortafuegos, en todos los perfiles: la red
-  propia aparece en Windows como red pública. El programa, igualmente, solo acepta dispositivos
-  encendido, por las conexiones activas, con el código y aceptándolos en el panel.
-- Si no está instalado el driver de monitores virtuales **Parsec VDD** (necesario para «Pantalla
-  adicional»; sin él, los dispositivos solo pueden usarse en espejo), ofrece una casilla para
-  instalarlo también. No va incluido, porque es de Parsec con su propia licencia: se descarga de su
-  web, solo se ejecuta si su huella SHA-256 coincide con la del instalador oficial 0.41.0.0 y se
-  instala con su propio asistente. Si la descarga falla, XtendedView se instala igual y el driver
-  se puede instalar después desde el panel (Ajustes → Pantalla adicional).
-- Al desinstalar, pregunta si borrar también los ajustes y certificados.
+<br>
 
-El mismo guion genera también la **versión portátil**, `dist\XtendedView-<versión>-portable.zip`: se
-descomprime donde se quiera (también en un USB) y se abre `xtendedview.exe`, sin instalar nada. El
-archivo `portable.txt` hace que guarde sus datos en `datos\`, a su lado. La primera vez, Windows
-pregunta si permite que use la red (hay que aceptar, también en redes públicas para la red propia).
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/panel-oscuro.png">
+  <img src="docs/panel-claro.png" alt="Panel de XtendedView con una tablet a la derecha y un móvil a la izquierda del ordenador" width="900">
+</picture>
 
-La versión instalada (y la portátil) no tiene ventana de consola: vive en el **área de notificación**
-(junto al reloj). Un clic abre el panel; con el botón derecho, **Abrir panel** o **Salir de XtendedView**
-(apaga antes la pantalla, quita los monitores virtuales y cierra la red propia). Si se abre otra vez,
-solo muestra el panel. Con **Cerrar del todo al cerrar el panel** (Ajustes, activado de serie), al
-cerrar la ventana del panel se apaga igual que con el botón Apagar y el programa termina; desactivado,
-sigue junto al reloj. Si un dispositivo pide conectarse con el panel cerrado, sale una
-**notificación de Windows**; al pulsarla se abre el panel. Sus datos (certificados, código, ajustes y
-el registro `xtendedview.log`) van a `%LOCALAPPDATA%\XtendedView`. Desde el código fuente siguen en
-`certs\` (o donde diga `--data`).
+</div>
 
-La parte del ordenador solo existe para Windows: captura, codificación y monitores virtuales usan
-piezas exclusivas de Windows. Una versión para Linux exigiría adaptarlas.
+## ¿Qué es?
 
-## Uso
+**XtendedView** convierte cualquier dispositivo con un navegador moderno (un móvil, una tablet, otro
+portátil) en una **pantalla de tu ordenador con Windows**, al estilo de Sidecar en el Mac, pero sin
+apps: el dispositivo solo abre una página web.
 
-1. Arranca XtendedView desde el menú Inicio (o `host-rs\target\release\xtendedview.exe` desde la
-   carpeta del proyecto, con consola). Se abre el **panel de control** en una ventana (también en
-   `http://localhost:8080/panel`).
-2. Elige cómo conectar: **Red del ordenador**, **Red propia** (el ordenador crea su Wi-Fi, sin
-   router) o **Cable USB** (experimental). Al elegir, se enciende. Cada encendido crea un **código de
-   emparejamiento nuevo**, así que hay que volver a escanear el QR. Mientras está apagada, ningún
-   dispositivo puede conectarse, no hay red propia ni monitor virtual. El botón **Apagar** de arriba
-   lo detiene todo.
-3. En el móvil o la tablet, **escanea con la cámara el código QR** del panel. Con red propia hay
-   dos: el primero une el dispositivo a la red y el segundo abre la pantalla.
-4. **Acepta la conexión en el panel.** Cada dispositivo que llega aparece arriba con su nombre, su
-   dirección y por dónde llega, con **Aceptar**, **Rechazar** y **Bloquear** (la ventana del panel
-   parpadea en la barra de tareas o, si está cerrada, sale una notificación de Windows). Si no se
-   acepta en 90 s, se rechaza solo. Un dispositivo ya aceptado no vuelve a preguntar hasta que apagues
-   (al reconectar tras un corte o al recargar la página). Uno bloqueado ya no puede ni pedir
-   conexión; los bloqueados se ven y se desbloquean en Ajustes.
+Puede ser **una pantalla más**, que amplía el escritorio como un monitor de verdad, o un **espejo**
+de uno de tus monitores. Y no es solo para mirar: el **táctil**, el **ratón** y el **lápiz** del
+dispositivo (con presión, como el S Pen o el Apple Pencil) controlan el ordenador.
 
-### Varios dispositivos a la vez
+Todo se maneja desde un **panel en el propio ordenador**: el dispositivo no tiene menús, solo muestra
+la pantalla.
 
-Hasta 4, cada uno con sus propios ajustes, que se guardan para la próxima vez (el navegador de cada
-dispositivo guarda un identificador):
+## ¿Para qué sirve?
 
-- **Pantalla adicional o espejo**, cada uno por su lado: dos pantallas adicionales, una adicional y
-  otra en espejo, dos en espejo del mismo monitor… Cada pantalla adicional tiene su monitor virtual.
-- **Colocación como en Windows:** en la sección «Pantallas» del panel hay un plano con los monitores
-  del ordenador y los de los dispositivos. La pantalla de cada dispositivo se arrastra (o se mueve con
-  las flechas) hasta donde está en la mesa y, al soltarla, se pega al borde más cercano sin solaparse;
-  el ordenador la mueve sin cortar la imagen y la recuerda para la próxima vez. Así se ordenan, por
-  ejemplo, dos dispositivos a la derecha. En la tarjeta del dispositivo, los botones **Arriba,
-  Abajo, Izquierda y Derecha** la colocan centrada en ese lado del ordenador (por fuera de otra que ya
-  esté ahí).
-- **Tamaño de los elementos:** la escala de Windows (125 %, 150 %…) de la pantalla adicional de cada
-  dispositivo, para agrandar iconos, textos y barras sin perder nitidez. Windows no documenta cómo
-  cambiarla por programa; se usa lo mismo que su configuración de pantalla (DisplayConfig, tipos -3 y
-  -4). En espejo no se ofrece: cambiaría la del monitor del ordenador.
-- **Fotogramas, calidad, resolución, pantalla completa y estadísticas** por dispositivo.
-- **Por la conexión que quiera:** en la tarjeta «Conexiones» se activan por separado la red del
-  ordenador, la red propia y el cable, y puede haber varias a la vez (por ejemplo, la tablet por la red
-  propia y el móvil por cable). Solo se aceptan dispositivos por las conexiones activas.
+- 🖥️ **Un segundo (o tercer) monitor** para el portátil, en casa o de viaje, con el móvil o la tablet
+  que ya llevas encima.
+- ✏️ **Una tableta de dibujo o de notas**: el lápiz llega a Windows con presión e inclinación, así
+  que los programas de dibujo varían el trazo como con una tableta gráfica.
+- 📊 **Tener a mano** el chat, la música, el correo o una herramienta mientras trabajas en la
+  pantalla grande.
+- ♻️ **Dar uso a ese móvil o tablet antiguos** que tienes en un cajón.
 
-Windows solo deja capturar cada monitor una vez por programa: si dos dispositivos duplican el mismo,
-comparten la captura y cada uno recibe la imagen a su tamaño, fotogramas y calidad.
+## Características
 
-El dispositivo solo muestra la pantalla, sin menús. Todo se ajusta desde el panel del ordenador,
-que tiene tres secciones: **Pantallas** (el plano de colocación y la tarjeta de cada dispositivo:
-modo, monitor que duplica, fotogramas, calidad, resolución, pantalla completa, estadísticas, sus
-medidas, registrar la resolución exacta y desconectarlo), **Conectar** (las tres formas de conectar
-con sus códigos QR) y **Ajustes** (tema claro, oscuro o como Windows, cerrar del todo al cerrar el
-panel, imagen más suave por Wi-Fi, medir la latencia, cambiar el código, el driver de monitores
-virtuales y los dispositivos bloqueados). El código de emparejamiento está siempre a la vista en la
-barra lateral.
-
-Los ajustes se guardan en `ajustes.json` de la carpeta de datos. Al encender, la consola del host también muestra
-el código QR. Con `--no-panel` no se abre la ventana del panel; con `--start` arranca ya
-encendida; con `--hotspot` se elige la red propia.
-
-El host no consulta el nombre de la Wi-Fi del ordenador: desde Windows 11 24H2 eso cuenta como usar
-la ubicación, y aparecería el aviso en la barra de tareas. Para saber si el ordenador sigue
-conectado a otra Wi-Fi, mira las tarjetas de red y sus direcciones.
-
-## Host en Rust
-
-```
-cargo build --release --manifest-path host-rs\Cargo.toml
-host-rs\target\release\xtendedview.exe
-```
-
-Para compilar hace falta el SDK de Windows (viene con las herramientas de compilación de Visual
-Studio que usa Rust): de él sale `rc.exe`, que mete el icono en el ejecutable.
-
-Hay que lanzarlo desde la carpeta del proyecto, o indicarla con `--root`, para que encuentre `web\`
-y `certs\`. Opciones: `--no-panel`, `--start`, `--hotspot`, `--max-inflight-ms`, `--port`,
-`--http-port`, `--data`, `--list` (monitores y tarjetas de red) y `-v` (diagnóstico).
-
-La captura y la codificación van enteras en la GPU: Desktop Duplication → procesador de vídeo D3D11
-(BGRA→NV12) → codificador H.264 por hardware (Media Foundation). El cursor va aparte del vídeo,
-así que se mueve sin esperar a codificar, y los keyframes se piden solo cuando hacen falta.
-
-### Modo extender (pantalla nueva)
-
-Con el modo extender, el dispositivo es un monitor más de Windows, no un espejo. Usa el driver
-de monitor virtual de Parsec (Parsec VDD), firmado por Parsec:
-
-1. Instálalo una vez, como administrador:
-   https://builds.parsec.app/vdd/parsec-vdd-0.41.0.0.exe (la versión marcada como estable).
-2. Arranca el host. El banner debe decir «Pantalla adicional: disponible».
-3. En el panel, elige **Pantalla adicional** y el lado del ordenador en el que está el
-   dispositivo. El host conecta un monitor virtual con la resolución más parecida a la de la
-   pantalla del dispositivo, lo coloca en ese lado (centrado), lo captura y lo quita al
-   desconectar. Si el host se cierra de golpe, el driver quita el monitor solo en un segundo.
-
-Si ninguno de los modos de serie del driver coincide con tu pantalla (el Fold desplegado, por
-ejemplo, es casi cuadrado), el panel ofrece un botón **Registrar resolución exacta**. También se
-puede hacer a mano, desde PowerShell como administrador y con el dispositivo desconectado:
-
-```
-tools\vdd-resoluciones.ps1 -Add 2184x1968@120
-```
-
-Admite hasta 5 resoluciones propias (`-List` las muestra y `-Clear` las borra). La escala del texto
-del monitor virtual se ajusta en Configuración → Pantalla, y Windows la recuerda.
-
-Pantallas en vertical (el Fold plegado, una tablet de pie): el driver solo ofrece modos
-horizontales, así que el host elige el modo con las medidas intercambiadas y pone el monitor
-virtual en orientación vertical, como un monitor girado. La imagen se endereza en la GPU al
-convertirla, sin coste extra. Al girar o plegar el dispositivo, el monitor se adapta solo. Para
-una resolución vertical exacta se registra con el lado largo primero (el aviso ya lo indica así).
-
-### Lápiz (S Pen, Apple Pencil)
-
-El lápiz llega a Windows como un lápiz de verdad, no como un ratón:
-
-- **Presión** (1024 niveles), **inclinación** y **giro**: los programas de dibujo y de notas
-  varían el grosor del trazo igual que con un lápiz conectado al portátil.
-- **Botón lateral** y **goma** (si el lápiz la tiene): Windows los trata como en un lápiz físico.
-- **Lápiz flotando** sin tocar la pantalla: mueve el cursor, como el S Pen sobre el móvil.
-- Se envían todas las muestras del lápiz, no solo una por fotograma, para que los trazos salgan
-  suaves.
-
-Si Windows no permite el lápiz sintético, el lápiz funciona como ratón.
-
-Una lección importante: el codificador QuickSync de Intel espera internamente con el temporizador
-de Windows, que por defecto avanza cada 15,6 ms. Por eso el programa pide 1 ms
-(`timeBeginPeriod`), desactiva el ahorro de energía del proceso y da prioridad MMCSS al hilo de
-captura. Sin eso, cada frame tardaba unos 16 ms en codificarse; con ello, unos 4 ms.
-
-La primera vez se crea la carpeta de datos (`certs\` desde el código fuente), con la autoridad de
-certificación propia, la clave del servidor y el código. No la compartas.
-
-## Probar con el Galaxy Fold (misma red Wi-Fi)
-
-1. En Chrome, abre la dirección `https://192.168.0.15:8443/#k=…` que aparece en la consola. Si la
-   IP cambia, la consola mostrará la nueva.
-2. Chrome avisará del certificado: **Configuración avanzada → Acceder a … (sitio no seguro)**.
-   Para no ver el aviso, instala el certificado desde `http://192.168.0.15:8080/setup`.
-3. El código ya viene en la dirección. Pulsa **Conectar**.
-4. Prueba a girar o desplegar el Fold: la imagen se adapta sola. El táctil del Fold funciona como
-   táctil de Windows (desplazar, tocar, pellizcar).
-
-Consejo: en el menú de Chrome, **Añadir a pantalla de inicio** la abre a pantalla completa como si
-fuera una app.
-
-### Medir la latencia total
-
-1. En el portátil, abre `http://localhost:8080/probe` en cualquier ventana y déjala **visible**.
-   No hace falta ponerla a pantalla completa.
-2. En el visor, abre el menú (⋯) y marca **Medir latencia total**.
-3. La línea `TOTAL` del panel de estadísticas mide desde que la sonda se dibuja en el portátil hasta
-   que el móvil tiene el frame decodificado. La pantalla del móvil añade además alrededor de un
-   refresco (8 ms a 120 Hz).
-
-La sonda muestra también un reloj grande: una foto en la que salgan las dos pantallas sirve como
-comprobación independiente.
-
-| Línea del panel | Qué mide |
+|  |  |
 |---|---|
-| Red | desde que el portátil envía el frame hasta que llega al móvil |
-| Decodif. | tiempo de decodificación en el móvil |
-| Portátil | frames codificados por segundo, frames descartados por congestión y variación del retardo del codificador |
-| TOTAL | latencia de punta a punta (media, mínimo y percentil 95) |
+| 🌐 **Solo el navegador** | Chrome, Edge o Safari. Nada que instalar en el dispositivo. |
+| 🧩 **Pantalla adicional o espejo** | Cada dispositivo como un monitor más (con su propia resolución) o duplicando uno. |
+| 📱📱 **Varios a la vez** | Hasta 4 dispositivos, cada uno con sus ajustes y su forma de conectar. |
+| 🧭 **Colocación como en Windows** | Arrastra cada pantalla hasta donde está en tu mesa, o colócala con un botón. |
+| ✍️ **Táctil, ratón y lápiz** | Multitáctil, rueda y lápiz con presión, inclinación, botón lateral y goma. |
+| ⚡ **Baja latencia** | Captura y codificación enteras en la GPU: unos 34 ms de punta a punta por cable. |
+| 📶 **Tres formas de conectar** | La red de casa, una Wi-Fi propia del ordenador (sin router) o un cable USB. |
+| 🌊 **Imagen más suave por Wi-Fi** | Un pequeño colchón opcional que tapa los parones de la Wi-Fi. |
+| 🔍 **Tamaño de los elementos** | La escala de Windows (125 %, 150 %…) de cada pantalla, sin perder nitidez. |
+| 🔒 **Seguro** | Código de emparejamiento, aceptar cada dispositivo, bloquear y certificado limitado a tu red. |
+| 🪟 **Como cualquier programa** | Instalador o versión portátil, icono junto al reloj, avisos de Windows y tema claro u oscuro. |
 
-## Sin router: red directa del portátil
+<div align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/inicio-oscuro.png">
+  <img src="docs/inicio-claro.png" alt="Pantalla de inicio: elegir cómo conectar el dispositivo" width="900">
+</picture>
+</div>
 
+## Cómo funciona
+
+```mermaid
+flowchart LR
+    subgraph PC["Ordenador con Windows"]
+        A["Escritorio<br>(monitor real o virtual)"] -->|Desktop Duplication| B["Imagen en la GPU"]
+        B -->|"Procesador de vídeo D3D11<br>BGRA a NV12, escala y giro"| C["Codificador H.264<br>por hardware"]
+        C --> D["Servidor HTTPS<br>y WebSocket"]
+        I["Táctil, lápiz y ratón<br>de Windows"]
+    end
+    subgraph DEV["Dispositivo: solo el navegador"]
+        E["WebCodecs<br>decodifica por hardware"] --> F["Pantalla"]
+        G["Táctil, lápiz y ratón"]
+    end
+    D -- "vídeo y cursor" --> E
+    G -- "eventos" --> I
 ```
-host-rs\target\release\xtendedview.exe --hotspot
-```
 
-(o elige «Red propia» en la pantalla de inicio del panel; la red se crea al encender).
+1. **Captura.** Con la API *Desktop Duplication* de Windows, el programa recibe cada imagen nueva
+   del escritorio directamente en la tarjeta gráfica, solo cuando algo cambia.
+2. **Pantallas virtuales.** Para usar un dispositivo como pantalla adicional, el driver gratuito
+   **Parsec VDD** (de [Parsec](https://parsec.app)) crea un monitor virtual con la resolución de su
+   pantalla, y Windows lo trata como un monitor más. Si el dispositivo está en vertical, el
+   monitor se gira; si se pliega o se gira, se adapta solo.
+3. **Conversión y codificación, sin salir de la GPU.** El procesador de vídeo de Direct3D 11 pasa la
+   imagen al formato del codificador, la escala y la endereza. El codificador H.264 de la gráfica
+   (Intel Quick Sync, NVIDIA NVENC o AMD AMF, a través de Media Foundation) la comprime en modo de
+   baja latencia: sin B-frames y con imágenes completas solo cuando hacen falta.
+4. **Envío.** El vídeo viaja cifrado por un WebSocket sobre HTTPS, por tu red local. Si el
+   dispositivo se retrasa (un parón de la Wi-Fi), el ordenador espera a que se ponga al día en lugar
+   de acumular retraso. El cursor va aparte, así que se mueve sin esperar al vídeo.
+5. **Visor.** La página web decodifica con *WebCodecs*, usando el decodificador por hardware del
+   dispositivo, y pinta cada imagen en cuanto llega.
+6. **Control.** El táctil, el lápiz y el ratón del dispositivo vuelven al ordenador y se inyectan en
+   Windows como los de verdad: varios dedos a la vez y un lápiz con presión, inclinación y giro.
 
-Crea una red Wi-Fi (WPA2) desde el portátil, sin necesidad de internet, y muestra el nombre y la
-contraseña. Conecta el dispositivo a esa red y abre `https://192.168.137.1:8443/`. La red existe
-mientras el host esté encendido. El nombre (`DIRECT-…`) y la
-contraseña son aleatorios y cambian cada vez, así que hay que volver a escanear el QR de la red.
-El portátil puede seguir conectado a la Wi-Fi de casa a la vez. Android avisará de que la red no
-tiene internet: elige mantener la conexión.
+<details>
+<summary><b>Algunos detalles técnicos curiosos</b></summary>
 
-Si el portátil sigue conectado a otra Wi-Fi, la tarjeta tiene que repartirse entre las dos y puede
-haber más variación de latencia. Para medir lo mejor posible, desconéctala.
+- **El temporizador de Windows.** El codificador de Intel espera internamente con el temporizador
+  del sistema, que por defecto avanza cada 15,6 ms. Pidiendo una resolución de 1 ms
+  (`timeBeginPeriod`), quitando el ahorro de energía del proceso y dando prioridad multimedia al hilo
+  de captura, cada imagen pasa de tardar unos 16 ms en codificarse a unos 4.
+- **Una captura por monitor.** Windows solo deja duplicar cada monitor una vez por programa, así que
+  si dos dispositivos muestran el mismo, comparten la captura y cada uno recibe su propia
+  codificación (tamaño, fotogramas y calidad).
+- **Pantallas en vertical.** El driver solo ofrece modos horizontales: para un móvil de pie se elige
+  el modo con las medidas cambiadas y se gira el monitor virtual, y la imagen se endereza en la GPU
+  al convertirla, sin coste extra.
+- **Esperar en lugar de descartar.** Si la red se para, descartar imágenes ya codificadas rompería la
+  cadena de H.264 y obligaría a mandar una imagen completa, mucho más grande, justo cuando la red va
+  peor. Así que el ordenador deja de codificar para ese dispositivo hasta que se pone al día.
+- **El nombre de la Wi-Fi, no.** Desde Windows 11 24H2, preguntar el nombre de la red Wi-Fi cuenta
+  como usar la ubicación (y sale el aviso). El programa se apaña con las tarjetas de red y sus
+  direcciones.
+- **La escala de Windows por programa.** Windows no documenta cómo cambiar la escala de un monitor;
+  XtendedView usa lo mismo que su propia configuración de pantalla (`DisplayConfig`, tipos -3 y -4).
 
-## Por cable (Android, anclaje USB) — experimental
+</details>
 
-Funciona y es la opción con menos latencia (con el Fold: 34 ms en total frente a 53–68 por Wi-Fi), pero
-de momento solo para dispositivos con anclaje USB y hay que activarlo a mano cada vez, así que en el
-panel aparece como experimental.
+## Rendimiento
 
-El navegador del móvil no puede usar el USB directamente, así que el cable crea una pequeña red entre
-los dos equipos con el **anclaje USB** de Android. Para el navegador es lo mismo que una Wi-Fi, pero
-sin interferencias: la red tarda menos de 1 ms y no da tirones.
+Latencia de punta a punta (desde que algo se dibuja en el ordenador hasta que aparece decodificado
+en el dispositivo), medida con la sonda incluida en el programa:
 
-1. En la pantalla de inicio, elige **Cable USB** (o, ya encendida, «Cable USB» y Aplicar; si conectas
-   el móvil estando en otra red, el panel ofrece pasar al cable).
-2. Conecta el móvil con un cable USB de datos y actívalo en el móvil: Ajustes → Conexiones →
-   Conexión compartida y Módem → **Módem USB** (en Samsung; en otros Android, «Compartir conexión
-   por USB» o «Anclaje de USB»). Windows ya trae el driver.
-3. En cuanto el ordenador ve la tarjeta del cable, el panel muestra el QR con su dirección en esa red.
+| Conexión | Latencia total |
+|---|---|
+| Cable USB (anclaje de Android) | **~34 ms** (p95 38 ms) |
+| Wi-Fi de casa | 53–68 ms |
 
-Con el anclaje, el móvil comparte también su internet, y Windows suele preferirlo a la Wi-Fi, así que
-el ordenador gastaría los datos del móvil. El panel lo detecta y ofrece **Usar la Wi-Fi para
-internet** (aviso de administrador): sube la métrica de esa tarjeta para que Windows prefiera la
-Wi-Fi. Windows lo recuerda para esa tarjeta y, si no hay otra conexión, sigue pudiendo usar el
-móvil.
+Medido con un Samsung Galaxy Z Fold y un portátil con Intel Core Ultra 7 258V (gráfica Arc 140V).
+Incluye la captura, la codificación, la red y la decodificación; la pantalla del dispositivo añade
+además, como mucho, un refresco.
 
-En modo cable solo se aceptan dispositivos que lleguen por el cable. También reconoce un cable de red
-directo (adaptador USB-C a Ethernet en un iPad u otro ordenador, sin router), aunque eso aún no está
-probado. `xtendedview.exe --list` muestra las tarjetas de red y cuál toma como cable.
+## Requisitos
+
+- **Ordenador:** Windows 10 u 11 de 64 bits, con una gráfica que tenga codificador H.264 por
+  hardware (Intel, NVIDIA o AMD; casi todas lo tienen). Probado con Intel Arc.
+- **Para usarlo como pantalla adicional:** el driver gratuito **Parsec VDD**. El instalador se ofrece
+  a instalarlo; sin él, los dispositivos funcionan en modo espejo.
+- **Dispositivo:** un navegador con WebCodecs: Chrome o Edge 94 o posterior (Android, Windows,
+  ChromeOS…) o Safari 16.4 o posterior (iPhone, iPad).
+- **Conexión:** la misma red que el ordenador, la Wi-Fi propia que crea el ordenador o, en Android,
+  un cable USB.
+
+## Instalación
+
+Descarga la última versión desde [**Releases**](https://github.com/LuisCS-0/XtendedView/releases/latest):
+
+- **Instalador** (`XtendedView-…-instalador.exe`). Instala el programa con su acceso en el menú
+  Inicio, permite sus conexiones en el cortafuegos y, si no lo tienes, ofrece instalar también el
+  driver Parsec VDD: lo descarga de la web de Parsec y solo lo ejecuta si es el instalador oficial.
+  Opcionalmente, lo abre al iniciar sesión.
+- **Versión portátil** (`XtendedView-…-portable.zip`). Sin instalar: descomprímela donde quieras,
+  también en un USB, y abre `xtendedview.exe`. Guarda sus datos en la carpeta `datos` a su lado. La
+  primera vez, Windows preguntará si dejas que use la red: acepta, también en redes públicas si vas
+  a usar la red propia.
+
+XtendedView vive junto al reloj: un clic abre el panel y, con el botón derecho, puedes salir. Al
+cerrar la ventana del panel, se apaga y deja el ordenador como estaba; si prefieres que siga
+funcionando en segundo plano, desactiva *Cerrar del todo al cerrar el panel* en Ajustes.
+
+## Primeros pasos
+
+1. **Abre XtendedView** y elige cómo conectar el dispositivo: *Red del ordenador*, *Red propia* o
+   *Cable USB*. Al elegir, se enciende con un código de emparejamiento nuevo.
+2. **Escanea el código QR** del panel con la cámara del dispositivo. Con la red propia hay dos: el
+   primero une el dispositivo a la Wi-Fi del ordenador y el segundo abre la pantalla.
+3. **La primera vez**, el navegador avisará de que la conexión no es privada, porque el certificado
+   lo crea tu propio ordenador. Puedes aceptar el aviso o, mejor, **instalar el certificado** desde la
+   página `/setup`, que explica cómo hacerlo en Android, iPhone y iPad.
+4. **Acepta el dispositivo** en el aviso que aparece en el panel (si el panel está cerrado, te avisa
+   Windows). Ahí también puedes rechazarlo o bloquearlo.
+5. **Coloca su pantalla** en el plano de la sección *Pantallas*, arrastrándola o con los botones
+   *Arriba*, *Abajo*, *Izquierda* y *Derecha*, y ajusta a tu gusto los fotogramas, la calidad o el
+   tamaño de los elementos.
+
+> [!TIP]
+> En el navegador del dispositivo, **Añadir a pantalla de inicio** abre XtendedView a pantalla
+> completa, como si fuera una app.
+
+### Formas de conectar
+
+| | Red del ordenador | Red propia | Cable USB *(experimental)* |
+|---|---|---|---|
+| **Qué es** | La Wi-Fi o la red a la que ya está conectado el ordenador | El ordenador crea su propia Wi-Fi, sin router ni internet | El anclaje USB (módem USB) de Android |
+| **Ideal para** | Casa u oficina | Cualquier sitio: un tren, una cafetería… | La mínima latencia, sin tirones |
+| **Dispositivos** | Todos | Todos | Android (iPad/otro PC: adaptador Ethernet, sin probar) |
+
+Se pueden activar varias a la vez (por ejemplo, la tablet por la red propia y el móvil por cable).
 
 ## Seguridad
 
-Pensado para usarlo también en sitios públicos:
+XtendedView está pensado para poder usarlo también fuera de casa:
 
-- **Apagada**, el host corta cualquier conexión que no venga del propio ordenador: desde fuera no
-  se ven ni las páginas ni el certificado. Tampoco hay red propia ni monitor virtual.
-- **Red propia**: nombre y contraseña aleatorios en cada encendido. El nombre tiene el formato de
-  Wi-Fi Direct (`DIRECT-…`, como impresoras y teles), así que no dice de quién es el ordenador ni
-  deja seguirlo de un sitio a otro. La contraseña tiene 16 caracteres (80 bits), suficiente aunque
-  alguien capture la conexión e intente adivinarla después.
-- **Solo por las conexiones activas**: cada conexión llega por su tarjeta (la red propia, la del
-  cable o la del ordenador). Si solo está activa la red propia, por ejemplo, los equipos de la Wi-Fi
-  de una cafetería en la que siga el portátil no pueden ni conectarse.
-- **Red del ordenador**: cualquiera de esa red llega al host, y lo protegen el código y la
-  aceptación en el panel. En una Wi-Fi pública es mejor la red propia o el cable.
-- **Aceptar cada dispositivo**: aunque alguien tenga el código, no ve nada hasta que lo aceptes en
-  el panel. Los aceptados se olvidan al apagar.
-- **Código de emparejamiento**: 8 caracteres (31⁸ combinaciones), nuevo en cada encendido. Se
-  comprueba un intento cada vez y cada fallo hace esperar un segundo, aunque se abran muchas
-  conexiones a la vez (como mucho un intento fallido por segundo).
-- La imagen y el control solo viajan cifrados (HTTPS). Sin cifrar solo se sirve lo necesario para
-  instalar el certificado, sin el nombre del equipo.
-- El panel de control solo responde desde el propio ordenador.
-- **Certificado del ordenador (CA)**, el que se instala en los dispositivos: está limitado a
-  direcciones privadas y a `localhost` (restricciones de nombre críticas, comprobadas con OpenSSL y
-  con Windows). Aunque alguien robara su clave de `certs\`, no le serviría para suplantar ninguna web
-  de internet en esos dispositivos. Tampoco puede crear otras CA y no lleva el nombre del equipo:
-  se llama «XtendedView - CA local XXXX», con un identificador al azar. Una CA guardada sin esas
-  restricciones no se usa: se crea otra al arrancar.
+- **Apagado, no entra nada:** el programa corta cualquier conexión que no venga del propio
+  ordenador.
+- **Código de emparejamiento** de 8 caracteres, nuevo en cada encendido, con un intento fallido por
+  segundo como mucho.
+- **Cada dispositivo se acepta en el panel**, aunque tenga el código, y se puede **bloquear**.
+- **Solo por las conexiones activas:** con la red propia, por ejemplo, nadie de la Wi-Fi de la
+  cafetería puede ni conectarse.
+- **Red propia** con nombre (`DIRECT-…`) y contraseña de 16 caracteres aleatorios, nuevos cada vez:
+  no dice de quién es el ordenador.
+- **Todo cifrado** (HTTPS). El certificado que se instala en los dispositivos está **limitado a
+  direcciones privadas**: aunque alguien robara su clave, no le serviría para suplantar ninguna web
+  de internet.
+- **El panel solo responde desde el propio ordenador.**
 
-## Limitaciones actuales
+## Compilar desde el código
 
-- Pantalla adicional: necesita el driver Parsec VDD (sin él, solo modo espejo).
-- Sin audio.
-- iPad: el mismo visor debería funcionar en Safari con iPadOS 16.4 o posterior. Ahí es mejor
-  **instalar el certificado** desde `/setup` que aceptar el aviso.
-- Cable: Android con anclaje USB; el Ethernet directo (iPad u otro PC con adaptador) aún sin probar.
-  Un iPad solo Wi-Fi no puede hacer anclaje USB: necesita el adaptador Ethernet.
+Hace falta [Rust](https://rustup.rs) (con las herramientas de compilación de Visual Studio, que traen
+el SDK de Windows: de él sale `rc.exe`, que mete el icono en el ejecutable).
 
-## Estructura
+```bash
+git clone https://github.com/LuisCS-0/XtendedView.git
+cd XtendedView
+cargo build --release --manifest-path host-rs/Cargo.toml
+host-rs/target/release/xtendedview.exe
+```
+
+Desde el código, el programa abre una consola con su registro y guarda sus datos (certificados,
+código y ajustes) en `certs/`, que nunca se sube al repositorio.
+
+| Opción | Para qué |
+|---|---|
+| `--no-panel` | No abrir la ventana del panel al arrancar |
+| `--start` | Arrancar ya encendido |
+| `--hotspot` | Usar la red propia |
+| `--port`, `--http-port` | Puertos HTTPS (8443) y HTTP (8080) |
+| `--data <carpeta>` | Carpeta de datos |
+| `--list` | Mostrar los monitores y las tarjetas de red |
+| `-v` | Registro detallado |
+
+Para generar el **instalador y la versión portátil** en `dist/` hace falta además
+[Inno Setup 6](https://jrsoftware.org/isdl.php):
+
+```bash
+powershell -ExecutionPolicy Bypass -File tools/instalador.ps1
+```
+
+Las pruebas: `cargo test --manifest-path host-rs/Cargo.toml`.
+
+<details>
+<summary><b>Estructura del proyecto</b></summary>
 
 ```
-host-rs/src/       host en Rust: capture.rs (DDA y cursor), convert.rs (BGRA→NV12 en GPU),
-                   mfenc.rs (QuickSync), pipeline.rs (hilo de captura), server.rs (HTTPS/WS, panel,
-                   encendido y seguridad), vdd.rs + display.rs (monitor virtual), certs.rs,
-                   input.rs (táctil, ratón y lápiz), hotspot.rs (red propia), prefs.rs (ajustes),
-                   sys.rs (red, QR, ventanas), tray.rs (icono junto al reloj), h264.rs
-host-rs/build.rs + xtendedview.rc   icono y nombre del ejecutable (con rc.exe del SDK de Windows)
-installer/xtendedview.iss  instalador de Windows (Inno Setup 6); lo genera tools/instalador.ps1 en dist/,
-                   junto con la versión portátil (.zip, con installer/portable.txt)
-assets/            icono de XtendedView (xtendedview.png de 1024 px y xtendedview.ico) y logotipo de
-                   texto para tema oscuro y claro (logo-tema-*.png)
-tools/iconos.ps1   genera todos los iconos a partir de una imagen (después, recompilar)
-tools/logo.ps1     prepara el logotipo de texto (sobre fondo negro) para el panel
-tools/vdd-resoluciones.ps1  resoluciones propias del monitor virtual (administrador)
-web/               visor (index.html, viewer.js), panel del ordenador (panel.*), sonda (probe.*),
-                   configuración (setup.html) e iconos (favicon.ico, icon-*.png)
+host-rs/src/
+  main.rs        arranque, consola o icono, una sola copia
+  server.rs      HTTPS y WebSocket, panel, dispositivos, encendido y seguridad
+  pipeline.rs    hilo de captura por monitor y codificador por dispositivo
+  capture.rs     Desktop Duplication y cursor
+  convert.rs     BGRA a NV12 en la GPU (procesador de vídeo D3D11)
+  mfenc.rs       codificador H.264 por hardware (Media Foundation)
+  vdd.rs         driver Parsec VDD
+  display.rs     monitores virtuales: modo, posición, giro y escala
+  input.rs       táctil, lápiz y ratón
+  certs.rs       autoridad de certificación local
+  hotspot.rs     red Wi-Fi propia (Wi-Fi Direct)
+  prefs.rs       ajustes
+  tray.rs        icono junto al reloj y notificaciones
+  sys.rs         red, códigos QR y ventanas
+web/
+  index.html, viewer.js    visor del dispositivo
+  panel.*                  panel del ordenador
+  setup.html               instalar el certificado
+  probe.*                  sonda para medir la latencia
+installer/                 instalador (Inno Setup) y versión portátil
+tools/                     generar el instalador, los iconos y el logotipo; resoluciones del driver
+assets/                    icono y logotipo
+docs/                      capturas de este README
 ```
+
+</details>
+
+## Limitaciones
+
+- **Solo Windows.** La captura, la codificación y los monitores virtuales usan piezas exclusivas de
+  Windows; llevarlo a Linux supondría rehacerlas.
+- **Sin audio**, de momento.
+- **Hasta 4 dispositivos** a la vez.
+- **Cable:** solo Android con anclaje USB. El cable de red directo (un iPad u otro ordenador con
+  adaptador Ethernet) está preparado pero sin probar.
+- Probado sobre todo con un Galaxy Fold y una gráfica Intel. Con NVIDIA o AMD debería funcionar
+  igual (usa el codificador que ofrezca Windows), pero no está probado.
 
 ## Licencia
 
-[MIT](LICENSE): se puede usar, copiar, modificar y distribuir libremente, también en otros
-proyectos, conservando el aviso de autoría. El driver Parsec VDD no forma parte del proyecto: cada
-usuario lo descarga de Parsec, con su propia licencia.
+[MIT](LICENSE). Puedes usarlo, copiarlo, modificarlo y distribuirlo libremente, también en otros
+proyectos, conservando el aviso de autoría.
+
+El driver Parsec VDD es de [Parsec](https://parsec.app) y tiene su propia licencia: no se incluye en
+XtendedView, cada usuario lo instala desde su web.
